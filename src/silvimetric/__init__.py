@@ -11,6 +11,8 @@ from .resources.metrics import (
     statistics,
     all_metrics,
     product_moments,
+    fusion_ldv_metrics,
+    get_fusion_ldv_metrics,
 )
 from .resources.taskgraph import Graph
 from .resources.log import Log

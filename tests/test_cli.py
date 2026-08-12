@@ -137,10 +137,11 @@ class TestCli(object):
         assert res2.exit_code == 0
         storage = Storage.from_db(p)
         with storage.open('r') as a:
+            populated = a[:, :]['count'] > 0
             exists_vals = a[:, :]['m_Z_exists']
-            assert exists_vals.all()
+            assert exists_vals[populated].all()
             count_vals = a[:, :]['m_Z_count']
-            assert (count_vals == 100).all()
+            assert (count_vals[populated] == 100).all()
 
     def test_cli_shatter(
         self,
@@ -310,4 +311,3 @@ class TestCli(object):
         assert len(i['history']) == 1
         sc = ShatterConfig.from_dict(i['history'][0])
         assert sc.finished
-

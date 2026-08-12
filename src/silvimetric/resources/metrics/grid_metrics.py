@@ -46,6 +46,7 @@ def _get_grid_metrics(elev_key='Z'):
     """
     from .covers import get_cover_metrics
     from .counts import get_count_metrics
+    from .fusion_ldv import get_fusion_ldv_metrics
 
     # prevent this muckery from being infectious
     covers = copy.deepcopy(get_cover_metrics(elev_key))
@@ -55,6 +56,7 @@ def _get_grid_metrics(elev_key='Z'):
     pmom = copy.deepcopy(product_moments)
     stats = copy.deepcopy(statistics)
     aad_copy = copy.deepcopy(aad)
+    fusion_ldv = copy.deepcopy(get_fusion_ldv_metrics(elev_key))
 
     assert elev_key in ['Z', 'HeightAboveGround']
     for m in (pcts | lmom | pmom).values():
@@ -84,7 +86,7 @@ def _get_grid_metrics(elev_key='Z'):
     aad_copy['mad_mode'].attributes = [A[elev_key]]
 
     grid_metrics: dict[str, Metric] = dict(
-        pcts | lmom | stats | pmom | aad_copy | counts | covers
+        pcts | lmom | stats | pmom | aad_copy | counts | covers | fusion_ldv
     )
     return grid_metrics
 
@@ -123,12 +125,27 @@ def get_grid_metrics(elev_key='Z', min_ht=2, ht_break=3):
         'all_count_above_mode',
         'all_count',
         '1st_count',
+        # FUSION vegetation strata partition all returns, including those
+        # below GridMetrics' configurable min_ht threshold.
+        'Strata-1',
+        'Strata-2',
+        'Strata-3',
+        'Strata-4',
+        'Strata-5',
+        'Strata-6',
         'profile_area',
     ]
     min_ht = make_elev_filter(min_ht, elev_key)
     ht_break = make_elev_filter(ht_break, elev_key)
     for gm in grid_metrics.values():
         if gm.name in no_filter_list:
+            if gm.name == 'all_1st_cover_above_htbreak':
+                # This metric is FUSION's ARbyFR: its denominator is all
+                # first returns and must remain unfiltered, but the nested
+                # numerator is all returns above ht_break.
+                for dependency in gm.dependencies:
+                    if dependency.name == 'all_count_above_htbreak':
+                        dependency.add_filter(ht_break)
             continue
 
         filter_fn = ht_break if gm.name in ht_break_list else min_ht

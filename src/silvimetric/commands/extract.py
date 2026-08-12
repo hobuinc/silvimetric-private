@@ -1,9 +1,12 @@
 from pathlib import Path
+from datetime import date
 
 from osgeo import gdal, osr
 import dask
 import numpy as np
 import pandas as pd
+import tiledb
+from distributed.client import _get_global_client as get_client
 
 from .. import Storage, Extents, ExtractConfig, Bounds
 
@@ -90,7 +93,9 @@ def get_data(
     ma_list = storage.get_derived_names(config.metrics, config.attrs)
 
     with storage.open('r') as tdb:
-        # tiledb queries need dates as int64 values
+        # New arrays store date ranges as epoch days for GDAL TileDB
+        # compatibility.  Older arrays used TileDB DATETIME_DAY, for which we
+        # retain the pandas-level comparison below.
         start_datetime = (
             np.datetime64(config.date[0], 'D').astype(np.int64).item()
         )
@@ -114,8 +119,19 @@ def get_data(
             coords=True,
         ).df[minx : maxx - 1, miny : maxy - 1]
 
-        data = data[data.end_time >= np.datetime64(config.date[0], 'D')]
-        data = data[data.start_time <= np.datetime64(config.date[1], 'D')]
+        if np.issubdtype(data.end_time.dtype, np.datetime64):
+            start_filter = np.datetime64(config.date[0], 'D')
+            end_filter = np.datetime64(config.date[1], 'D')
+        elif data.end_time.dtype == object and (
+            data.end_time.dropna().map(lambda value: isinstance(value, date)).any()
+        ):
+            start_filter = config.date[0].date()
+            end_filter = config.date[1].date()
+        else:
+            start_filter = start_datetime
+            end_filter = end_datetime
+        data = data[data.end_time >= start_filter]
+        data = data[data.start_time <= end_filter]
 
         # find values that are not unique, means they have multiple entries
         # TODO phase this out at some point, storage is no longer created
@@ -124,6 +140,13 @@ def get_data(
         dedup_data = data[data.index.duplicated(keep='last')]
         clean_data = data[~data.index.duplicated(False)]
         return pd.concat([clean_data, dedup_data])
+
+
+def get_shard_data(
+    config: ExtractConfig, shard_uri: str, extents: Extents
+) -> pd.DataFrame:
+    """Open and read one immutable shard on the worker that owns the task."""
+    return get_data(config, Storage.from_db(shard_uri), extents)
 
 
 def extract(config: ExtractConfig) -> None:
@@ -135,7 +158,13 @@ def extract(config: ExtractConfig) -> None:
 
     dask.config.set({'dataframe.convert-string': False})
 
-    storage = Storage.from_db(config.tdb_dir)
+    if tiledb.object_type(
+        config.tdb_dir, ctx=Storage.get_tdb_context()
+    ) == 'group':
+        storages = Storage.shard_members(config.tdb_dir)
+    else:
+        storages = [Storage.from_db(config.tdb_dir)]
+    storage = storages[0]
     schema = storage.open('r').schema
     ma_list = storage.get_derived_names(config.metrics, config.attrs)
     config.log.debug(f'Extracting metrics {[m for m in ma_list]}')
@@ -153,7 +182,22 @@ def extract(config: ExtractConfig) -> None:
             if a in m.attributes:
                 cell_size = cell_size + np.dtype(m.dtype).itemsize
 
-    final = get_data(config, storage, e)
+    client = get_client()
+    if client is None or len(storages) == 1:
+        frames = [get_data(config, member, e) for member in storages]
+    else:
+        # Shards are independent immutable arrays.  Read them on the Dask
+        # workers while the shatter fleet is still available, then preserve
+        # the group order when gathering for the existing dedup semantics.
+        futures = [
+            client.submit(get_shard_data, config, member.config.tdb_dir, e)
+            for member in storages
+        ]
+        frames = client.gather(futures)
+    final = pd.concat(frames)
+    # Spatial shards are expected to be disjoint.  Keep the newest value if a
+    # future overlapping shard is present, matching existing TileDB semantics.
+    final = final[~final.index.duplicated(keep='last')]
     futures = []
     for ma in ma_list:
         dtype = schema.attr(ma).dtype
@@ -174,4 +218,11 @@ def extract(config: ExtractConfig) -> None:
             )
         )
 
-    dask.compute(*futures)
+    # Shard reads above can use an active distributed client.  Raster writes
+    # deliberately stay on the process that owns ``config.out_dir``: worker
+    # hosts do not share that filesystem, and their output would not be part
+    # of the caller's extract result.
+    if client is None:
+        dask.compute(*futures)
+    else:
+        dask.compute(*futures, scheduler="threads")

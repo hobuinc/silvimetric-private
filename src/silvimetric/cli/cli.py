@@ -313,6 +313,50 @@ def initialize_cmd(
     help='Number of cells to include per tile',
 )
 @click.option(
+    '--processing-strategy',
+    type=click.Choice(['leaf-v1', 'macro-v2', 'macro-v3-stage-push']),
+    default='leaf-v1',
+    show_default=True,
+    help='Shatter execution strategy.',
+)
+@click.option(
+    '--read-group-size',
+    type=int,
+    default=None,
+    help='Square-cell count per macro-v2 PDAL read group.',
+)
+@click.option(
+    '--processing-halo-m',
+    type=float,
+    default=None,
+    help='PDAL reader collar in CRS units (default: one storage cell).',
+)
+@click.option(
+    '--stage-tiledb-dir',
+    type=str,
+    default=None,
+    help='Local TileDB URI for macro-v3 stage writes (stage writer only).',
+)
+@click.option(
+    '--stage-publish-uri',
+    type=str,
+    default=None,
+    help='New immutable URI to receive the validated macro-v3 array.',
+)
+@click.option(
+    '--stage-fragment-size-mb',
+    type=int,
+    default=300,
+    show_default=True,
+    help='Desired macro-v3 local consolidation-plan fragment size in MiB.',
+)
+@click.option(
+    '--stage-worker-address',
+    type=str,
+    default=None,
+    help='Optional Dask worker address for the macro-v3 stage writer actor.',
+)
+@click.option(
     '--report',
     is_flag=True,
     default=False,
@@ -336,7 +380,22 @@ def initialize_cmd(
     help='Date range the data was produced during',
 )
 @click.pass_obj
-def shatter_cmd(app, pointcloud, bounds, report, tilesize, date, dates):
+def shatter_cmd(
+    app,
+    pointcloud,
+    bounds,
+    report,
+    tilesize,
+    processing_strategy,
+    read_group_size,
+    processing_halo_m,
+    stage_tiledb_dir,
+    stage_publish_uri,
+    stage_fragment_size_mb,
+    stage_worker_address,
+    date,
+    dates,
+):
     """Insert data provided by POINTCLOUD into the silvimetric DATABASE"""
 
     dask_handle(
@@ -362,6 +421,13 @@ def shatter_cmd(app, pointcloud, bounds, report, tilesize, date, dates):
         filename=pointcloud,
         bounds=bounds,
         tile_size=tilesize,
+        processing_strategy=processing_strategy,
+        read_group_size=read_group_size,
+        processing_halo_m=processing_halo_m,
+        stage_tdb_dir=stage_tiledb_dir,
+        stage_publish_uri=stage_publish_uri,
+        stage_fragment_size_mb=stage_fragment_size_mb,
+        stage_worker_address=stage_worker_address,
     )
 
     if report:

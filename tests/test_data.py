@@ -3,6 +3,51 @@ from silvimetric.resources.config import StorageConfig
 
 
 class Test_Data(object):  # noqa: D101
+    def test_ept_reader_ignores_unreadable_tiles(self):
+        """EPT source transport errors must not abort an entire shatter run."""
+
+        class Reader:
+            type = 'readers.ept'
+
+            def __init__(self):
+                self._options = {}
+
+        reader = Reader()
+        Data._apply_ept_options(reader)
+
+        assert reader._options['ignore_unreadable'] is True
+
+    def test_tindex_copc_reader_args_receive_bounds_and_resolution(self):
+        """A tindex planner query must constrain its embedded COPC readers."""
+        bounds = Bounds(1, 2, 3, 4)
+        args = Data._tindex_reader_args(
+            [
+                {'type': 'readers.las', 'nosrs': True},
+                {'type': 'readers.copc', 'requests': 4},
+            ],
+            bounds,
+            160,
+        )
+        copc = next(arg for arg in args if arg['type'] == 'readers.copc')
+        assert copc == {
+            'type': 'readers.copc',
+            'requests': 4,
+            'bounds': str(bounds),
+            'resolution': 160,
+        }
+        assert args[0] == {'type': 'readers.las', 'nosrs': True}
+
+    def test_tindex_copc_reader_args_are_created_when_absent(self):
+        """COPC options are safe to supply even if the index selects LAS too."""
+        args = Data._tindex_reader_args(None, Bounds(1, 2, 3, 4), 160)
+        assert args == [
+            {
+                'type': 'readers.copc',
+                'bounds': '[1.0, 2.0, 3.0, 4.0]',
+                'resolution': 160,
+            }
+        ]
+
     def test_filepath(
         self,
         no_cell_line_path: str,
@@ -73,4 +118,3 @@ class Test_Autzen(object):  # noqa: D101
         data.execute()
         assert len(data.array) == 577637
         assert data.estimate_count(data.bounds) == 577637
-

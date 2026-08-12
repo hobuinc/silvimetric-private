@@ -8,6 +8,8 @@ stats/
 *.html
 **/html/**
 **/_build/**
+.ipynb_checkpoints/
+notebooks/rasters/
 
 # local conda environment
 # conda env create --prefix .conda/ -f environment.yml

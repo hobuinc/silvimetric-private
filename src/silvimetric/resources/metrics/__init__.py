@@ -7,6 +7,7 @@ from .l_moments import l_moments
 from .stats import statistics
 from .p_moments import product_moments
 from .grid_metrics import get_grid_metrics
+from .fusion_ldv import fusion_ldv_metrics, get_fusion_ldv_metrics
 
 all_metrics: dict[str, Metric] = dict(percentiles | l_moments | statistics |
         product_moments)

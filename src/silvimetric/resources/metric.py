@@ -45,6 +45,7 @@ class Metric:
         filters: Optional[List[FilterFn]] = None,
         attributes: Optional[List[Attribute]] = None,
         nan_policy: NanPolicy = 'propagate',
+        description: Optional[str] = None,
     ) -> None:
         self.name = name
         """Metric name. eg. mean"""
@@ -79,6 +80,8 @@ class Metric:
         """
         self.nan_value = -9999
         """ Value to denote empty space or invalid values. """
+        self.description = description
+        """Human-readable definition of the metric and its units."""
         kind = np.dtype(self.dtype).kind
         if kind in ['i', 'f']:
             self.nan_value = -9999
@@ -108,6 +111,8 @@ class Metric:
             return False
         elif self.attributes != other.attributes:
             return False
+        elif self.description != other.description:
+            return False
         else:
             return True
 
@@ -129,6 +134,8 @@ class Metric:
                 ),
                 'attrs',
                 frozenset(self.attributes),
+                'description',
+                self.description,
             )
         )
         return val
@@ -144,8 +151,12 @@ class Metric:
         return Attr(
             name=entry_name,
             dtype=self.dtype,
-            filters=FilterList([ZstdFilter(level = 7)]),
-            nullable=True
+            filters=FilterList([ZstdFilter(level=7)]),
+            # Derived metrics use ``nan_value`` for no-data cells.  A
+            # non-nullable TileDB attribute is required for GDAL's TileDB
+            # raster driver, which does not provide a validity buffer.
+            nullable=False,
+            fill=self.nan_value,
         )
 
     def entry_name(self, attr: str) -> str:
@@ -272,6 +283,7 @@ class Metric:
                 base64.b64encode(dill.dumps(f)).decode() for f in self.filters
             ],
             'attributes': [a.to_json() for a in self.attributes],
+            'description': self.description,
         }
         return val
 
@@ -311,7 +323,15 @@ class Metric:
         else:
             filters = []
 
-        return Metric(name, dtype, method, dependencies, filters, attributes)
+        return Metric(
+            name,
+            dtype,
+            method,
+            dependencies,
+            filters,
+            attributes,
+            description=data.get('description'),
+        )
 
     @staticmethod
     def from_string(data: str) -> Self:

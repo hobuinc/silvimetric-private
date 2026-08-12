@@ -1,4 +1,7 @@
 from pathlib import Path
+
+import numpy as np
+import tiledb
 from osgeo import gdal
 from pyproj import CRS
 from math import ceil
@@ -77,6 +80,31 @@ class Test_Extract(object):
     def test_extract(self, extract_config: ExtractConfig):
         extract(extract_config)
         tif_test(extract_config)
+
+    def test_extract_shard_group_matches_array(
+        self, extract_config: ExtractConfig, tmp_path
+    ):
+        """Extract reads a one-member shard group identically to its array."""
+        extract(extract_config)
+        group_uri = (tmp_path / 'shards.tdb').as_posix()
+        tiledb.Group.create(group_uri)
+        with tiledb.Group(group_uri, 'w') as group:
+            group.add(extract_config.tdb_dir, name='shard-0000')
+
+        group_config = ExtractConfig(
+            tdb_dir=group_uri,
+            out_dir=(tmp_path / 'group-extract').as_posix(),
+            bounds=extract_config.bounds,
+            date=extract_config.date,
+        )
+        extract(group_config)
+
+        for array_raster in Path(extract_config.out_dir).glob('*.tif'):
+            group_raster = Path(group_config.out_dir) / array_raster.name
+            assert group_raster.exists()
+            array_values = gdal.Open(str(array_raster)).ReadAsArray()
+            group_values = gdal.Open(str(group_raster)).ReadAsArray()
+            np.testing.assert_equal(array_values, group_values)
 
     def test_sub_bounds_extract(self, extract_config: ExtractConfig):
         s = extract_config

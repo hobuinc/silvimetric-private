@@ -2,6 +2,7 @@ from uuid import UUID
 from typing_extensions import Union
 from typing import Optional
 from datetime import datetime
+import tiledb
 
 from .. import Storage, Bounds
 
@@ -22,8 +23,20 @@ def info(
     :param name: Name query, defaults to None.
     :return: Returns json object containing information on database.
     """
-    if isinstance(storage, str):
-        storage = Storage.from_db(storage)
+    if (
+        isinstance(storage, str)
+        and tiledb.object_type(storage, ctx=Storage.get_tdb_context()) == 'group'
+    ):
+        members = Storage.shard_members(storage)
+        storage = members[0]
+        group_histories = [
+            member.get_history(dates, bounds, name, concise)
+            for member in members
+        ]
+    else:
+        group_histories = None
+        if isinstance(storage, str):
+            storage = Storage.from_db(storage)
 
 
     if bounds is None:
@@ -42,7 +55,11 @@ def info(
     }
 
     try:
-        history = storage.get_history(dates, bounds, name, concise)
+        history = (
+            [item for items in group_histories for item in items]
+            if group_histories is not None
+            else storage.get_history(dates, bounds, name, concise)
+        )
         if bool(history) and isinstance(history, list):
             history = [h for h in history]
         elif bool(history):

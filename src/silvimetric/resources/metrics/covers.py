@@ -29,6 +29,10 @@ def get_cover_metrics(elev_key='Z'):
         cover_fn,
         dependencies=[counts['all_count']],
         attributes=[A['ReturnNumber']],
+        description=(
+            'FUSION/LDV Cover3mAll at the configured ht_break: percentage '
+            'of all returns above the height break.'
+        ),
     )
     """(all returns above mean) / (total returns) """
     all_cover_above_mean = Metric(
@@ -54,6 +58,10 @@ def get_cover_metrics(elev_key='Z'):
         dependencies=[counts['1st_count']],
         filters=[first_returns_filter],
         attributes=[A['ReturnNumber']],
+        description=(
+            'FUSION/LDV Cover3m1st at the configured ht_break: percentage '
+            'of first returns above the height break.'
+        ),
     )
     """(first returns above mean) / (total first returns) """
     first_cover_above_mean = Metric(
@@ -81,6 +89,11 @@ def get_cover_metrics(elev_key='Z'):
         dependencies=[counts['all_count_above_htbreak']],
         filters=[first_returns_filter],
         attributes=[A['ReturnNumber']],
+        description=(
+            'FUSION/LDV ARbyFR at the configured ht_break: all returns '
+            'above the height break divided by total first returns, as a '
+            'percentage.'
+        ),
     )
     """(all returns above mean ht) / (total first returns) """
     all_first_cover_above_mean = Metric(

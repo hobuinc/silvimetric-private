@@ -1,8 +1,10 @@
 import pyproj
+import tiledb
 
 import os
 import json
 import uuid
+import math
 
 from pathlib import Path
 from abc import ABC, abstractmethod
@@ -240,6 +242,40 @@ class ShatterConfig(Config):
     provided., defaults to uuid.uuid()"""
     tile_size: Union[int, None] = field(default=None)
     """The number of cells to include in a tile., defaults to None"""
+    processing_strategy: str = field(default='leaf-v1')
+    """Execution strategy: ``leaf-v1``, ``macro-v2``, or staged macro-v3."""
+    read_group_size: Union[int, None] = field(default=None)
+    """Number of cells in a square macro read group for ``macro-v2``."""
+    processing_halo_m: Union[float, None] = field(default=None)
+    """Reader collar in CRS units. Defaults to one storage resolution cell."""
+    execution_timing: dict = field(default_factory=dict)
+    """Executor timing summary populated by shatter after a completed run."""
+    macro_diagnostics: bool = field(default=False)
+    """Record per-macro worker RSS and phase timing for a bounded profiling run."""
+    stage_tdb_dir: Union[str, None] = field(default=None)
+    """Local TileDB URI owned by the macro-v3 stage writer."""
+    stage_publish_uri: Union[str, None] = field(default=None)
+    """New, immutable TileDB URI to receive the validated staged array."""
+    stage_fragment_size_mb: int = field(default=300)
+    """Desired local TileDB consolidation-plan fragment size in MiB."""
+    stage_shard_side_macros: int = field(default=4)
+    """Number of adjacent macro reads along one side of a published shard."""
+    stage_shard_target_points: Union[int, None] = field(default=None)
+    """Maximum coarse-quickinfo upper-bound point estimate per S3 shard."""
+    stage_planner_resolution_multiple: int = field(default=8)
+    """Coarse PDAL reader resolution as a multiple of storage resolution."""
+    stage_planner_sample_point_multiplier: Union[float, None] = field(
+        default=None
+    )
+    """Calibrated raw-points-per-coarse-sample-point multiplier for a source."""
+    stage_planner_calibration_sample_count: int = field(default=4)
+    """Number of bounded native-resolution reads used to calibrate a shard plan."""
+    stage_planner_calibration_window_m: float = field(default=250.0)
+    """Side length, in CRS units, of each bounded native-resolution sample."""
+    stage_planner_density_safety_factor: float = field(default=1.25)
+    """Inflation applied to measured source density before shard splitting."""
+    stage_worker_address: Union[str, None] = field(default=None)
+    """Optional Dask worker address on which to place the stage writer actor."""
     start_timestamp: float = field(default=None)
     """The process start timestamp., defaults to None"""
     end_timestamp: float = field(default=None)
@@ -282,6 +318,95 @@ class ShatterConfig(Config):
         if isinstance(self.tile_size, float):
             self.tile_size = int(self.tile_size)
 
+        if isinstance(self.read_group_size, float):
+            self.read_group_size = int(self.read_group_size)
+
+        strategies = {'leaf-v1', 'macro-v2', 'macro-v3-stage-push'}
+        if self.processing_strategy not in strategies:
+            raise ValueError(
+                'processing_strategy must be leaf-v1, macro-v2, or '
+                'macro-v3-stage-push'
+            )
+
+        if self.processing_halo_m is not None and self.processing_halo_m < 0:
+            raise ValueError('processing_halo_m must be non-negative')
+
+        if self.processing_strategy in {'macro-v2', 'macro-v3-stage-push'}:
+            if self.tile_size is None or self.read_group_size is None:
+                raise ValueError(
+                    'macro strategies require both tile_size and '
+                    'read_group_size'
+                )
+            if self.tile_size < 1 or self.read_group_size < 1:
+                raise ValueError(
+                    'tile_size and read_group_size must be positive'
+                )
+
+            tile_side = math.isqrt(self.tile_size)
+            read_group_side = math.isqrt(self.read_group_size)
+            if tile_side**2 != self.tile_size:
+                raise ValueError(
+                    'macro tile_size must be a square cell count'
+                )
+            if read_group_side**2 != self.read_group_size:
+                raise ValueError(
+                    'macro read_group_size must be a square cell count'
+                )
+            if read_group_side < tile_side:
+                raise ValueError('read_group_size must be at least tile_size')
+            if read_group_side % tile_side:
+                raise ValueError(
+                    'read_group_size side must be divisible by tile_size side'
+                )
+
+        if self.processing_strategy == 'macro-v3-stage-push':
+            if not self.stage_tdb_dir or not self.stage_publish_uri:
+                raise ValueError(
+                    'macro-v3-stage-push requires stage_tdb_dir and '
+                    'stage_publish_uri'
+                )
+            if self.stage_tdb_dir == self.stage_publish_uri:
+                raise ValueError(
+                    'stage_tdb_dir and stage_publish_uri must be different'
+                )
+            if self.tdb_dir == self.stage_publish_uri:
+                raise ValueError(
+                    'macro-v3-stage-push tdb_dir is a schema seed and must '
+                    'differ from stage_publish_uri'
+                )
+            if self.stage_fragment_size_mb < 1:
+                raise ValueError('stage_fragment_size_mb must be positive')
+            if self.stage_shard_side_macros < 1:
+                raise ValueError('stage_shard_side_macros must be positive')
+            if (
+                self.stage_shard_target_points is not None
+                and self.stage_shard_target_points < 1
+            ):
+                raise ValueError('stage_shard_target_points must be positive')
+            if self.stage_planner_resolution_multiple < 1:
+                raise ValueError(
+                    'stage_planner_resolution_multiple must be positive'
+                )
+            if (
+                self.stage_planner_sample_point_multiplier is not None
+                and self.stage_planner_sample_point_multiplier < 1
+            ):
+                raise ValueError(
+                    'stage_planner_sample_point_multiplier must be at least 1'
+                )
+            if self.stage_planner_calibration_sample_count < 1:
+                raise ValueError(
+                    'stage_planner_calibration_sample_count must be positive'
+                )
+            if self.stage_planner_calibration_window_m <= 0:
+                raise ValueError(
+                    'stage_planner_calibration_window_m must be positive'
+                )
+            if self.stage_planner_density_safety_factor < 1:
+                raise ValueError(
+                    'stage_planner_density_safety_factor must be at least 1'
+                )
+
     @property
     def timestamp(self):
         end_time_temp = int(datetime.now().timestamp() * 1000)
@@ -306,6 +431,33 @@ class ShatterConfig(Config):
             time_slot=self.time_slot,
             bounds=self.bounds.to_json(),
             date=date,
+            processing_strategy=self.processing_strategy,
+            tile_size=self.tile_size,
+            read_group_size=self.read_group_size,
+            processing_halo_m=self.processing_halo_m,
+            macro_diagnostics=self.macro_diagnostics,
+            stage_tdb_dir=self.stage_tdb_dir,
+            stage_publish_uri=self.stage_publish_uri,
+            stage_fragment_size_mb=self.stage_fragment_size_mb,
+            stage_shard_side_macros=self.stage_shard_side_macros,
+            stage_shard_target_points=self.stage_shard_target_points,
+            stage_planner_resolution_multiple=(
+                self.stage_planner_resolution_multiple
+            ),
+            stage_planner_sample_point_multiplier=(
+                self.stage_planner_sample_point_multiplier
+            ),
+            stage_planner_calibration_sample_count=(
+                self.stage_planner_calibration_sample_count
+            ),
+            stage_planner_calibration_window_m=(
+                self.stage_planner_calibration_window_m
+            ),
+            stage_planner_density_safety_factor=(
+                self.stage_planner_density_safety_factor
+            ),
+            stage_worker_address=self.stage_worker_address,
+            execution_timing=self.execution_timing,
         )
 
         return d
@@ -347,6 +499,32 @@ class ShatterConfig(Config):
             name=uuid.UUID(x['name']),
             bounds=Bounds(*x['bounds']),
             tile_size=x['tile_size'],
+            processing_strategy=x.get('processing_strategy', 'leaf-v1'),
+            read_group_size=x.get('read_group_size'),
+            processing_halo_m=x.get('processing_halo_m'),
+            macro_diagnostics=x.get('macro_diagnostics', False),
+            stage_tdb_dir=x.get('stage_tdb_dir'),
+            stage_publish_uri=x.get('stage_publish_uri'),
+            stage_fragment_size_mb=x.get('stage_fragment_size_mb', 300),
+            stage_shard_side_macros=x.get('stage_shard_side_macros', 4),
+            stage_shard_target_points=x.get('stage_shard_target_points'),
+            stage_planner_resolution_multiple=x.get(
+                'stage_planner_resolution_multiple', 8
+            ),
+            stage_planner_sample_point_multiplier=x.get(
+                'stage_planner_sample_point_multiplier'
+            ),
+            stage_planner_calibration_sample_count=x.get(
+                'stage_planner_calibration_sample_count', 4
+            ),
+            stage_planner_calibration_window_m=x.get(
+                'stage_planner_calibration_window_m', 250.0
+            ),
+            stage_planner_density_safety_factor=x.get(
+                'stage_planner_density_safety_factor', 1.25
+            ),
+            stage_worker_address=x.get('stage_worker_address'),
+            execution_timing=x.get('execution_timing', {}),
             start_timestamp=x['start_timestamp'],
             end_timestamp=x['end_timestamp'],
             point_count=x['point_count'],
@@ -388,7 +566,11 @@ class ExtractConfig(Config):
             config = self.tdb_dir.config
             self.tdb_dir = config.tdb_dir
         else:
-            config = Storage.from_db(self.tdb_dir).config
+            ctx = Storage.get_tdb_context()
+            if tiledb.object_type(self.tdb_dir, ctx=ctx) == 'group':
+                config = Storage.shard_members(self.tdb_dir)[0].config
+            else:
+                config = Storage.from_db(self.tdb_dir, ctx=ctx).config
 
         if self.attrs is None:
             self.attrs = config.attrs

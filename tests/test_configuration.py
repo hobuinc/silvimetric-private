@@ -1,11 +1,41 @@
 from silvimetric import StorageConfig, ShatterConfig, ExtractConfig
 import numpy as np
 import datetime
+import pytest
 
 from silvimetric.resources.storage import Storage
 
 
 class Test_Configuration(object):
+    def test_macro_v2_validation(
+        self,
+        storage_config: StorageConfig,
+        shatter_config: ShatterConfig,
+        bounds,
+    ):
+        with pytest.raises(ValueError, match='square cell count'):
+            ShatterConfig(
+                tdb_dir=storage_config.tdb_dir,
+                filename=shatter_config.filename,
+                date=shatter_config.date,
+                bounds=bounds,
+                tile_size=10,
+                processing_strategy='macro-v2',
+                read_group_size=16,
+            )
+
+        config = ShatterConfig(
+            tdb_dir=storage_config.tdb_dir,
+            filename=shatter_config.filename,
+            date=shatter_config.date,
+            bounds=bounds,
+            tile_size=4,
+            processing_strategy='macro-v2',
+            read_group_size=16,
+            processing_halo_m=40,
+        )
+        assert ShatterConfig.from_string(str(config)) == config
+
     def test_serialization(
         self,
         storage_config: StorageConfig,
