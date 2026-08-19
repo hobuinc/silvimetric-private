@@ -220,19 +220,23 @@ class Storage:
             *dim_atts,
             *metric_atts,
         ]
+        gdal_metadata = s.build_gdal_metadata(
+            geotransform=(
+                config.root.minx,
+                config.resolution,
+                0.0,
+                config.root.maxy,
+                0.0,
+                -config.resolution,
+            ),
+            attrs=gdal_attrs,
+        )
+        # GDAL's TileDB dense-array reader expects the PAM XML in UINT8
+        # metadata.  TileDB-Py stores a Python str as STRING_UTF8, so pass a
+        # uint8 buffer explicitly for this GDAL-specific metadata item.
         s.save_metadata(
             '_gdal',
-            s.build_gdal_metadata(
-                geotransform=(
-                    config.root.minx,
-                    config.resolution,
-                    0.0,
-                    config.root.maxy,
-                    0.0,
-                    -config.resolution,
-                ),
-                attrs=gdal_attrs,
-            ),
+            np.frombuffer(gdal_metadata.encode('utf-8'), dtype=np.uint8),
         )
         s.save_metadata('dataset_type', 'raster')
         s.save_config()
@@ -421,7 +425,7 @@ class Storage:
             self._reader = reader
             return reader.meta[key]
 
-    def save_metadata(self, key: str, data: str) -> None:
+    def save_metadata(self, key: str, data: Union[str, np.ndarray]) -> None:
         """
         Save metadata to storage.
 

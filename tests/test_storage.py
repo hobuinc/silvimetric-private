@@ -143,6 +143,16 @@ class Test_Storage(object):
                 assert all([e_name(a, m) == schema(a, m) for a in a_list])
 
     def test_metadata(self, storage: Storage, shatter_config: ShatterConfig):
+        with storage.open('r') as array:
+            gdal_metadata, metadata_type = array.meta.__getitem__(
+                '_gdal', include_type=True
+            )
+            assert metadata_type == tiledb.libtiledb.DataType.UINT8
+            assert gdal_metadata.dtype == np.uint8
+            assert gdal_metadata.tobytes().decode('utf-8').startswith(
+                '<PAMDataset>'
+            )
+
         shatter_config.time_slot = storage.reserve_time_slot()
         storage.save_shatter_meta(shatter_config)
         shc_copy = copy.deepcopy(shatter_config)
