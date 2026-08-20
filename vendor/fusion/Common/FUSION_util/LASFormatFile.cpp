@@ -333,8 +333,8 @@ BOOL CLASPublicHeaderBlock::Read(FILE *FileHandle)
 		// read all fields from header...may not always work to read as structure since byte packing differs depending on compiler options
 		int cnt = 0;
 		cnt += (int) fread(FileSignature, sizeof(char), 4, FileHandle);
-		cnt += (int) fread(&Reserved, sizeof(ulong), 1, FileHandle);
-		cnt += (int) fread(&GUIDData1, sizeof(ulong), 1, FileHandle);
+		cnt += (int) fread(&Reserved, sizeof(fusion_ulong), 1, FileHandle);
+		cnt += (int) fread(&GUIDData1, sizeof(fusion_ulong), 1, FileHandle);
 		cnt += (int) fread(&GUIDData2, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fread(&GUIDData3, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fread(GUIDData4, sizeof(char), 8, FileHandle);
@@ -345,12 +345,12 @@ BOOL CLASPublicHeaderBlock::Read(FILE *FileHandle)
 		cnt += (int) fread(&FlightDateJulian, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fread(&Year, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fread(&HeaderSize, sizeof(ushort), 1, FileHandle);
-		cnt += (int) fread(&OffsetToData, sizeof(ulong), 1, FileHandle);
-		cnt += (int) fread(&NumberOfVariableLengthRecords, sizeof(ulong), 1, FileHandle);
+		cnt += (int) fread(&OffsetToData, sizeof(fusion_ulong), 1, FileHandle);
+		cnt += (int) fread(&NumberOfVariableLengthRecords, sizeof(fusion_ulong), 1, FileHandle);
 		cnt += (int) fread(&PointDataFormatID, sizeof(uchar), 1, FileHandle);
 		cnt += (int) fread(&PointDataRecordLength, sizeof(ushort), 1, FileHandle);
-		cnt += (int) fread(&LegacyNumberOfPointRecords, sizeof(ulong), 1, FileHandle);
-		cnt += (int) fread(LegacyNumberOfPointsByReturn, sizeof(ulong), 5, FileHandle);
+		cnt += (int) fread(&LegacyNumberOfPointRecords, sizeof(fusion_ulong), 1, FileHandle);
+		cnt += (int) fread(LegacyNumberOfPointsByReturn, sizeof(fusion_ulong), 5, FileHandle);
 		cnt += (int) fread(&XScaleFactor, sizeof(double), 1, FileHandle);
 		cnt += (int) fread(&YScaleFactor, sizeof(double), 1, FileHandle);
 		cnt += (int) fread(&ZScaleFactor, sizeof(double), 1, FileHandle);
@@ -389,7 +389,7 @@ BOOL CLASPublicHeaderBlock::Read(FILE *FileHandle)
 
 		if (VersionMajor == 1 && VersionMinor > 3) {
 			cnt += (int) fread(&StartOfExtendedVLR, sizeof(unsigned __int64), 1, FileHandle);
-			cnt += (int) fread(&NumberOfExtendedVLRs, sizeof(ulong), 1, FileHandle);
+			cnt += (int) fread(&NumberOfExtendedVLRs, sizeof(fusion_ulong), 1, FileHandle);
 			cnt += (int) fread(&ExtendedNumberOfPointRecords, sizeof(unsigned __int64), 1, FileHandle);
 			cnt += (int) fread(ExtendedNumberOfPointsByReturn, sizeof(unsigned __int64), 15, FileHandle);
 
@@ -529,24 +529,24 @@ BOOL CLASPublicHeaderBlock::Write(FILE *FileHandle)
 				}
 			}
 			else {
-				LegacyNumberOfPointRecords = (ulong) NumberOfPointRecords;
+				LegacyNumberOfPointRecords = (fusion_ulong) NumberOfPointRecords;
 				for (i = 0; i < 5; i++) {
-					LegacyNumberOfPointsByReturn[i] = (ulong) NumberOfPointsByReturn[i];
+					LegacyNumberOfPointsByReturn[i] = (fusion_ulong) NumberOfPointsByReturn[i];
 				}
 			}
 		}
 		else {
-			LegacyNumberOfPointRecords = (ulong) NumberOfPointRecords;
+			LegacyNumberOfPointRecords = (fusion_ulong) NumberOfPointRecords;
 			for (i = 0; i < 5; i ++) {
-				LegacyNumberOfPointsByReturn[i] = (ulong) NumberOfPointsByReturn[i];
+				LegacyNumberOfPointsByReturn[i] = (fusion_ulong) NumberOfPointsByReturn[i];
 			}
 		}
 
 		// write all fields from header...may not always work to read as structure since byte packing differs depending on compiler options
 		int cnt = 0;
 		cnt += (int) fwrite(FileSignature, sizeof(char), 4, FileHandle);
-		cnt += (int) fwrite(&Reserved, sizeof(ulong), 1, FileHandle);
-		cnt += (int) fwrite(&GUIDData1, sizeof(ulong), 1, FileHandle);
+		cnt += (int) fwrite(&Reserved, sizeof(fusion_ulong), 1, FileHandle);
+		cnt += (int) fwrite(&GUIDData1, sizeof(fusion_ulong), 1, FileHandle);
 		cnt += (int) fwrite(&GUIDData2, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fwrite(&GUIDData3, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fwrite(GUIDData4, sizeof(char), 8, FileHandle);
@@ -557,12 +557,12 @@ BOOL CLASPublicHeaderBlock::Write(FILE *FileHandle)
 		cnt += (int) fwrite(&FlightDateJulian, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fwrite(&Year, sizeof(ushort), 1, FileHandle);
 		cnt += (int) fwrite(&HeaderSize, sizeof(ushort), 1, FileHandle);
-		cnt += (int) fwrite(&OffsetToData, sizeof(ulong), 1, FileHandle);
-		cnt += (int) fwrite(&NumberOfVariableLengthRecords, sizeof(ulong), 1, FileHandle);
+		cnt += (int) fwrite(&OffsetToData, sizeof(fusion_ulong), 1, FileHandle);
+		cnt += (int) fwrite(&NumberOfVariableLengthRecords, sizeof(fusion_ulong), 1, FileHandle);
 		cnt += (int) fwrite(&PointDataFormatID, sizeof(uchar), 1, FileHandle);
 		cnt += (int) fwrite(&PointDataRecordLength, sizeof(ushort), 1, FileHandle);
-		cnt += (int) fwrite(&LegacyNumberOfPointRecords, sizeof(ulong), 1, FileHandle);
-		cnt += (int) fwrite(LegacyNumberOfPointsByReturn, sizeof(ulong), 5, FileHandle);
+		cnt += (int) fwrite(&LegacyNumberOfPointRecords, sizeof(fusion_ulong), 1, FileHandle);
+		cnt += (int) fwrite(LegacyNumberOfPointsByReturn, sizeof(fusion_ulong), 5, FileHandle);
 		cnt += (int) fwrite(&XScaleFactor, sizeof(double), 1, FileHandle);
 		cnt += (int) fwrite(&YScaleFactor, sizeof(double), 1, FileHandle);
 		cnt += (int) fwrite(&ZScaleFactor, sizeof(double), 1, FileHandle);
@@ -587,7 +587,7 @@ BOOL CLASPublicHeaderBlock::Write(FILE *FileHandle)
 			NumberOfExtendedVLRs = 0;
 			// end of modified code for V1.4...12/21/2016
 			cnt += (int) fwrite(&StartOfExtendedVLR, sizeof(unsigned __int64), 1, FileHandle);
-			cnt += (int) fwrite(&NumberOfExtendedVLRs, sizeof(ulong), 1, FileHandle);
+			cnt += (int) fwrite(&NumberOfExtendedVLRs, sizeof(fusion_ulong), 1, FileHandle);
 			cnt += (int) fwrite(&ExtendedNumberOfPointRecords, sizeof(unsigned __int64), 1, FileHandle);
 			cnt += (int) fwrite(ExtendedNumberOfPointsByReturn, sizeof(unsigned __int64), 15, FileHandle);
 		}

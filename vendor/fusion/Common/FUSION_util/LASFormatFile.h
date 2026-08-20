@@ -65,7 +65,7 @@
 // LAS is a binary format with explicitly sized fields.  FUSION was written
 // for Windows, where long is 32 bits even in 64-bit builds.  Do not use the
 // platform's long here: it is 64 bits on macOS and most 64-bit Linux targets.
-typedef  std::uint32_t ulong;
+typedef  std::uint32_t fusion_ulong;
 typedef  unsigned short ushort;
 typedef  unsigned char uchar;
 typedef	 unsigned char bitbyte;
@@ -87,7 +87,7 @@ typedef struct {
 
 union FileSrcID {
 	V11FILESOURCEID V11;							// version 1.1 file source ID and reserved block
-	ulong			Reserved;						// original version 1.0 data block
+	fusion_ulong			Reserved;						// original version 1.0 data block
 };
 
 class CLASPublicHeaderBlock
@@ -95,7 +95,7 @@ class CLASPublicHeaderBlock
 public:
 	char			FileSignature[5];				// must be "LASF"...magic number like signature
 	FileSrcID		Reserved;						// extra variable...this has different interpretations depending on the LAS version
-	ulong			GUIDData1;						// Globally unique identifier
+	fusion_ulong			GUIDData1;						// Globally unique identifier
 	ushort			GUIDData2;						// Globally unique identifier
 	ushort			GUIDData3;						// Globally unique identifier
 	uchar			GUIDData4[9];					// Globally unique identifier
@@ -106,12 +106,12 @@ public:
 	ushort			FlightDateJulian;				// julian day of the year the data was collected
 	ushort			Year;							// year the data was collected
 	ushort			HeaderSize;						// actual size of the header block
-	ulong			OffsetToData;					// number of bytes from beginning of file to the actual point data
-	ulong			NumberOfVariableLengthRecords;	// number of variable length records
+	fusion_ulong			OffsetToData;					// number of bytes from beginning of file to the actual point data
+	fusion_ulong			NumberOfVariableLengthRecords;	// number of variable length records
 	uchar			PointDataFormatID;				// format identifier for point data records
 	ushort			PointDataRecordLength;			// length of each point record
-	ulong			LegacyNumberOfPointRecords;		// total number of point records in file...in LAS 1.4 this should be 0
-	ulong			LegacyNumberOfPointsByReturn[5];// array containing number of point records per return...first value is number of first returns...in LAS 1.4 all should be 0
+	fusion_ulong			LegacyNumberOfPointRecords;		// total number of point records in file...in LAS 1.4 this should be 0
+	fusion_ulong			LegacyNumberOfPointsByReturn[5];// array containing number of point records per return...first value is number of first returns...in LAS 1.4 all should be 0
 	double			XScaleFactor;					// x scale factor
 	double			YScaleFactor;					// y scale factor
 	double			ZScaleFactor;					// z scale factor
@@ -127,7 +127,7 @@ public:
 	unsigned __int64 WaveformStart;					// Start of waveform data packet record...version 1.3+ only
 
 	unsigned __int64 StartOfExtendedVLR;			// start of first extended VLR...version 1.4+ only
-	ulong			NumberOfExtendedVLRs;			// number of extended VLRs...version 1.4+ only
+	fusion_ulong			NumberOfExtendedVLRs;			// number of extended VLRs...version 1.4+ only
 	unsigned __int64 ExtendedNumberOfPointRecords;	// extended number of point records...version 1.4+ only
 	unsigned __int64 ExtendedNumberOfPointsByReturn[15];	// extended number of points by return...version 1.4+ only
 

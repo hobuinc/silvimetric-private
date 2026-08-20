@@ -78,8 +78,16 @@ inline HKEY HKEY_CURRENT_USER = nullptr;
 #define _ftelli64 ftello
 #define __min(left, right) ((left) < (right) ? (left) : (right))
 #define __max(left, right) ((left) > (right) ? (left) : (right))
+// Match LASzip's platform typedef for FUSION's Windows spelling, including
+// pointer parameters.  Linux uses `long` for int64_t; macOS's bundled
+// LASzip declarations use `long long`.
+#if defined(__APPLE__)
 #define __int64 long long
 #define _int64 long long
+#else
+#define __int64 long
+#define _int64 long
+#endif
 #define __int32 int
 #define __int16 short
 #define __int8 signed char

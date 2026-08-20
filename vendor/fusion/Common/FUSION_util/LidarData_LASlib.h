@@ -28,7 +28,6 @@
 #endif
 
 // type definitions (shortened for ease of use)
-typedef  std::uint32_t ulong;
 typedef  unsigned short ushort;
 typedef  unsigned char uchar;
 typedef	 unsigned char bitbyte;
