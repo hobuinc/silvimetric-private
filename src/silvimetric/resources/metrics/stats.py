@@ -4,20 +4,30 @@ from scipy import stats
 from ..metric import Metric
 from .p_moments import mean
 
-def m_mode(data, *args):
-    # copy FUSION's process as closely as possible
-    # split into 64 bins, return highest bin count
-    # if there is a tie, return first entry (lowest bin index)
 
-    try:
-        counts, bins = np.histogram(data, 64)
-    except ValueError:
-        try:
-            counts, bins = np.histogram(data)
-        except ValueError:
-            return np.nan
-    mode = bins[:-1][counts == counts.max()]
-    return mode[0]
+def m_mode(data, *args):
+    """Return FUSION GridMetrics' 64-bin mode.
+
+    FUSION scales the full data range to bin indexes 0 through 63, rather
+    than using 64 equal-width NumPy histogram bins.  Its representative value
+    is the *lower scaled bin position*, and ties select the lowest index.
+    """
+    values = np.asarray(data, dtype=float)
+    if values.size == 0:
+        return np.nan
+
+    minimum = values.min()
+    maximum = values.max()
+    if minimum == maximum:
+        return minimum
+
+    bin_count = 64
+    scaled = ((values - minimum) / (maximum - minimum)) * (bin_count - 1)
+    bins = np.bincount(
+        np.clip(scaled.astype(int), 0, bin_count - 1), minlength=bin_count
+    )
+    mode_bin = int(np.argmax(bins))
+    return minimum + (mode_bin / (bin_count - 1)) * (maximum - minimum)
 
 
 def m_median(data, *args):
@@ -33,20 +43,22 @@ def m_max(data, *args):
 
 
 def m_stddev(data, *args):
-    return np.std(data)
+    if data.count() < 2:
+        return np.nan
+    # FUSION uses sqrt(sum((x - mean)^2) / (n - 1)).
+    return np.std(data, ddof=1)
 
 
 def m_cv(data, *args):
     stddev, mean = args
-    if mean == 0:
-        return np.nan
-    return stddev / mean
+    return np.divide(stddev, mean)
+
 
 def m_crr(data, *args):
     mean, minimum, maximum = args
     den = maximum - minimum
     if den == 0:
-        return np.nan
+        return 0.0
     return (mean - minimum) / den
 
 
@@ -55,7 +67,10 @@ def m_sqmean(data):
 
 
 def m_cumean(data):
-    return np.cbrt(np.mean(np.power(np.absolute(data), 3)))
+    # GridMetrics computes cube-root(abs(sum(x^3)) / n), not the mean of
+    # absolute cubes.  They only differ when the selected values are mixed
+    # positive and negative.
+    return np.cbrt(np.abs(np.sum(np.power(data, 3))) / data.count())
 
 
 def m_mad_median(data, *args):

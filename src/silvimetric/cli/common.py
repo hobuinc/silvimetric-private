@@ -153,15 +153,15 @@ class MetricParamType(click.ParamType):
                     elif 'grid_metric' in val:
                         args = val.split('_')
                         elev_key = 'Z'
-                        min_ht = 2
+                        min_ht = -99999.0
                         ht_break = 3
                         for idx, a in enumerate(args):
                             if idx == 2:
                                 elev_key = a
                             elif idx == 3:
-                                min_ht = a
+                                min_ht = float(a)
                             elif idx == 4:
-                                ht_break = a
+                                ht_break = float(a)
                             else:
                                 continue
                         # TODO this shouldn't return grid_metrics if we're

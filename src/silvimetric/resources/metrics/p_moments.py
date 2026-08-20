@@ -2,16 +2,16 @@ import numpy as np
 
 from ..metric import Metric
 
+
 def m_mean(data, *args):
-    if not data.any():
+    if len(data) == 0:
         return np.nan
-    m = data.mean()
-    return m
+    return np.mean(data)
 
 
 def m_variance(data, *args):
     # copy FUSION's variance approach
-    denom = (data.count() - 1)
+    denom = data.count() - 1
     if denom == 0:
         return np.nan
     num = ((data - data.mean()) ** 2).sum()
@@ -20,16 +20,24 @@ def m_variance(data, *args):
 
 def m_skewness(data, *args):
     # copy FUSION's approximation of skewness
-    denom = ( (data.count() - 1) * np.std(data) ** 3)
+    count = data.count()
+    if count < 2:
+        return np.nan
+    stddev = np.std(data, ddof=1)
+    denom = (count - 1) * stddev**3
     if denom == 0:
         return np.nan
     num = ((data - data.mean()) ** 3).sum()
-    return  num / denom
+    return num / denom
 
 
 def m_kurtosis(data, *args):
     # copy FUSION's approximation of kurtosis
-    denom = ((data.count() - 1) * np.std(data) ** 4)
+    count = data.count()
+    if count < 2:
+        return np.nan
+    stddev = np.std(data, ddof=1)
+    denom = (count - 1) * stddev**4
     if denom == 0:
         return np.nan
     num = ((data - data.mean()) ** 4).sum()

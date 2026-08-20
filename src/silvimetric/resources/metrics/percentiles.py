@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 from ..metric import Metric
 
-percents = [1,5,10,20,25,30,40,50,60,70,75,80,90,95,99]
+percents = [1, 5, 10, 20, 25, 30, 40, 50, 60, 70, 75, 80, 90, 95, 99]
+
 
 def percentile_base(data: pd.DataFrame):
     return np.percentile(data, percents).tolist()
@@ -75,6 +76,7 @@ def m_90m10(data, *args):
 def m_95m05(data, *args):
     return args[0][13] - args[0][1]
 
+
 def m_iq(data, *args):
     q1 = args[0][4]
     q3 = args[0][10]
@@ -82,33 +84,21 @@ def m_iq(data, *args):
 
 
 def m_profile_area(data, *args):
-    # sanity check...must have valid heights/elevations
-    p = np.percentile(data, range(0,100)).tolist()
-    # dmax = data.max()
-    # dmin = data.min()
-    # if dmax <= 0:
-    #     return -9999.0
+    # FUSION first clamps every sampled height to zero, then linearly
+    # interpolates P00 through P99 using (n - 1) * percentile / 100.
+    values = np.asarray(data, dtype=float)
+    if values.size == 0 or values.max() <= 0.0:
+        return -9999.0
 
-    # p0 = max(dmin, 0.0)
-    p0 = p[0]
+    percentiles = np.percentile(np.maximum(values, 0.0), range(100))
+    p99 = percentiles[99]
+    if p99 <= 0.0:
+        return -9999.0
 
-    # second sanity check...99th percentile must be > 0
-    try:
-        p99 = p[99]
-        if p99 > 0.0:
-            # compute area under normalized percentile height curve using
-            # composite trapeziod rule
-            grid_pa = p0 / p99
-            pcts = np.array(p[1:99])
-            areas = pcts * 2 / p99
-            pa = grid_pa + areas.sum() + 1
-
-            return pa * 0.5
-        else:
-            return -9999.0
-    except Exception:
-        return -9999
-
+    # Composite trapezoid area from P00 through P99, normalized by P99.
+    return (
+        percentiles[0] / p99 + (2.0 * percentiles[1:99] / p99).sum() + 1.0
+    ) * 0.5
 
 
 pct_base = Metric('pct_base', object, percentile_base)

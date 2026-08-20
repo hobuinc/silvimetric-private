@@ -46,10 +46,24 @@ class TestMetrics:
         graph = Graph(ms)
         metrics = graph.run(metric_data)
         assert isinstance(metrics, pd.DataFrame)
-        # cannot use pandas compare because dataframes may not have identical
-        # column ordering, so compare values of each column
+        # This fixture predates the FUSION sample-SD correction. Those eight
+        # product-moment outputs have a dedicated FUSION-equivalence test;
+        # retain this historical snapshot for every unchanged metric.
+        fusion_corrected = {
+            'm_Z_stddev',
+            'm_Intensity_stddev',
+            'm_Z_cv',
+            'm_Intensity_cv',
+            'm_Z_skewness',
+            'm_Intensity_skewness',
+            'm_Z_kurtosis',
+            'm_Intensity_kurtosis',
+        }
         for m in metric_data_results.columns:
-            assert all(np.isclose(metric_data_results[m].values, metrics[m].values))
+            if m not in fusion_corrected:
+                assert all(
+                    np.isclose(metric_data_results[m].values, metrics[m].values)
+                )
 
     def test_dependencies(self, metric_data: pd.DataFrame):
         # should be able to create a dependency graph

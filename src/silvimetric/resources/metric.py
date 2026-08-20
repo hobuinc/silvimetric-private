@@ -46,6 +46,8 @@ class Metric:
         attributes: Optional[List[Attribute]] = None,
         nan_policy: NanPolicy = 'propagate',
         description: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        minimum_points: Optional[int] = None,
     ) -> None:
         self.name = name
         """Metric name. eg. mean"""
@@ -82,6 +84,12 @@ class Metric:
         """ Value to denote empty space or invalid values. """
         self.description = description
         """Human-readable definition of the metric and its units."""
+        self.metadata = dict(metadata) if metadata is not None else {}
+        """Machine-readable metric provenance, definition, and parameters."""
+        if minimum_points is not None and minimum_points < 0:
+            raise ValueError('minimum_points must be non-negative')
+        self.minimum_points = minimum_points
+        """Require strictly more than this many selected points to run."""
         kind = np.dtype(self.dtype).kind
         if kind in ['i', 'f']:
             self.nan_value = -9999
@@ -113,6 +121,10 @@ class Metric:
             return False
         elif self.description != other.description:
             return False
+        elif self.metadata != other.metadata:
+            return False
+        elif self.minimum_points != other.minimum_points:
+            return False
         else:
             return True
 
@@ -136,6 +148,10 @@ class Metric:
                 frozenset(self.attributes),
                 'description',
                 self.description,
+                'metadata',
+                json.dumps(self.metadata, sort_keys=True, default=str),
+                'minimum_points',
+                self.minimum_points,
             )
         )
         return val
@@ -169,6 +185,9 @@ class Metric:
         # In order to access the correct location, we need a map of groupby
         # indices to their locations and then grab the correct index from args
 
+        if self.minimum_points is not None and len(d) <= self.minimum_points:
+            return self.nan_value
+
         attr = d.name
         attrs = [a.entry_name(attr) for a in self.dependencies]
 
@@ -179,10 +198,29 @@ class Metric:
             pass_args = []
             for a in attrs:
                 try:
-                    arg = deps.at[(yi, xi), a]
+                    if a in deps.columns:
+                        arg = deps.at[(yi, xi), a]
+                    else:
+                        # A dependency can be intentionally evaluated on a
+                        # different source attribute (for example a return
+                        # count consumed by an elevation density metric). In
+                        # that case it has exactly one output column.
+                        candidates = [
+                            column
+                            for column in deps.columns
+                            if column.endswith(
+                                f'_{self.dependencies[len(pass_args)].name}'
+                            )
+                        ]
+                        if len(candidates) != 1:
+                            raise KeyError(a)
+                        arg = deps.at[(yi, xi), candidates[0]]
                     if isinstance(arg, (list, tuple)):
                         pass_args.append(arg)
-                    elif np.isnan(arg):
+                    elif (
+                        arg == self.dependencies[len(pass_args)].nan_value
+                        or np.isnan(arg)
+                    ):
                         return self.nan_value
                     else:
                         pass_args.append(arg)
@@ -284,6 +322,8 @@ class Metric:
             ],
             'attributes': [a.to_json() for a in self.attributes],
             'description': self.description,
+            'metadata': self.metadata,
+            'minimum_points': self.minimum_points,
         }
         return val
 
@@ -331,6 +371,8 @@ class Metric:
             filters,
             attributes,
             description=data.get('description'),
+            metadata=data.get('metadata'),
+            minimum_points=data.get('minimum_points'),
         )
 
     @staticmethod
