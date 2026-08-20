@@ -9,6 +9,16 @@
 - Keep related changes in small commits; this branch contains both the TileDB
   GDAL-compatibility work and the FUSION metric-alignment work.
 
+## Continuous integration
+
+- `.github/workflows/main.yml` is the private CI workflow. It runs on every
+  push and pull request, with a manual-dispatch option.
+- The full pytest suite runs on Ubuntu and macOS with Python 3.12 and 3.14.
+  The optional remote S3 test runs only when the private repository supplies
+  `SM_AWS_ACCESS_KEY_ID` and `SM_AWS_SECRET_ACCESS_KEY` secrets.
+- A separate Ubuntu/macOS CMake job builds and CTests vendored GridMetrics.
+  Keep this workflow private-only; do not duplicate it into a public repo.
+
 ## FUSION metric alignment
 
 - `get_grid_metrics()` now exposes FUSION-style controls: no minimum-height
