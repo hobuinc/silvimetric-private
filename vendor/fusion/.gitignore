@@ -1,0 +1,22 @@
+# ignore all of the visual studio git-related files
+.vs/*
+.vs/*.*
+FUSION_Metrics/.vs/*
+FUSION_Metrics/.vs/*.*
+FUSION_Metrics/.vs/FUSION_Metrics/v15/Browse.VC.db
+
+.vs/ProjectSettings.json
+.vs/slnx.sqlite
+.vs/VSWorkspaceState.json
+
+*.obj
+*.tlog
+*.pch
+*.pdb
+*.log
+*.db
+*.ipch
+*.res
+*.exe
+*.VC.opendb
+*.VC.db

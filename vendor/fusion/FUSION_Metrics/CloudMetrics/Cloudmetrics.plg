@@ -1,0 +1,51 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: Cloudmetrics - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E46.tmp" with contents
+[
+/nologo /MD /W3 /GX /Od /I "..\common\FUSION_util" /I "..\..\common\FUSION_util" /I "..\..\common\LTK" /I "\Bob's Stuff\Code from other people\lastools_latest" /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "_MBCS" /D "_AFXDLL" /Fp"Release/Cloudmetrics.pch" /Yu"stdafx.h" /Fo"Release/" /Fd"Release/" /FD /c 
+"G:\Bob's Stuff\Code\FUSION_Metrics\Cloudmetrics\Cloudmetrics.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\DataIndex.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\LidarData_LASlib.cpp"
+]
+Creating command line "cl.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E46.tmp" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E57.tmp" with contents
+[
+/nologo /subsystem:console /incremental:no /pdb:"Release/cloudmetrics.pdb" /machine:I386 /nodefaultlib:"LIBC" /out:"\fusion_demo\cloudmetrics.exe" 
+".\Release\argslib.obj"
+".\Release\Cloudmetrics.obj"
+".\Release\DataCatalogEntry.obj"
+".\Release\DataFile.obj"
+".\Release\DataIndex.obj"
+".\Release\filespec.obj"
+".\Release\LASFormatFile.obj"
+".\Release\laszip_api.obj"
+".\Release\LidarData_LASlib.obj"
+".\Release\plansdtm.obj"
+".\Release\StdAfx.obj"
+".\Release\Cloudmetrics.res"
+]
+Creating command line "link.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E57.tmp"
+<h3>Output Window</h3>
+Compiling...
+Cloudmetrics.cpp
+DataIndex.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+LidarData_LASlib.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+Generating Code...
+*****Using PNW code and/or LASzip DLL for LAS access...
+Linking...
+
+
+
+<h3>Results</h3>
+cloudmetrics.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

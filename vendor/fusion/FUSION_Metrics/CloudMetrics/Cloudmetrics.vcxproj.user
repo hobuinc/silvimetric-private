@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LocalDebuggerCommandArguments>/new /strata:"0.5,1,2,4,8,16,32,48,64" trees_normalized_Clip_000000#.lda test.csv</LocalDebuggerCommandArguments>
+    <LocalDebuggerWorkingDirectory>H:\T3_DroneLidar\Ba\Plot7\Processing\Trees\TAOpts</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+    <LocalDebuggerCommand>g:\fusion_demo\cloudmetrics64.exe</LocalDebuggerCommand>
+  </PropertyGroup>
+</Project>

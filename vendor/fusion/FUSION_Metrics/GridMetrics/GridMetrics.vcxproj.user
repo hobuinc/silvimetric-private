@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <LocalDebuggerCommandArguments>G:\fusion_demo\GridMetrics64.exe  /verbose /minht:6.5616 /buffer:200.000000 /outlier:-98.424,492.12 /class:~6,7,9,10 /gridxy:1032000.000000,816000.000000,1049600.000000,824800.000000 J:\HoodCanal\Hood_Canal_NAIP_processing\AP_run2\HC100NAIP_BLOCK29_baregroundlist.txt 6.5616 100.0 J:\HoodCanal\Hood_Canal_NAIP_processing\AP_run2\Products_HoodCanal_2019-04-29\BLOCK29\TileMetrics_100p0FEET\BLOCK29_C00001_R00001_S001_metrics.csv J:\HoodCanal\Hood_Canal_NAIP_processing\AP_run2\BLOCK29_C00001_R00001_S001.las </LocalDebuggerCommandArguments>
+    <LocalDebuggerWorkingDirectory>J:\HoodCanal\Hood_Canal_NAIP_processing\AP_run2</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LocalDebuggerCommand>G:\Bob's Stuff\Code\GitHub\bin\x64\Debug\GridMetrics64.exe</LocalDebuggerCommand>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+    <LocalDebuggerCommandArguments>/noground 1 10 test.csv USGS_LPC_DE_Snds_2013_LAS_2015_14262930020004.laz</LocalDebuggerCommandArguments>
+    <LocalDebuggerWorkingDirectory>I:\testing</LocalDebuggerWorkingDirectory>
+  </PropertyGroup>
+</Project>

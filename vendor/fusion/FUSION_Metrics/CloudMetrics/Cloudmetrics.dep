@@ -1,0 +1,60 @@
+# Microsoft Developer Studio Generated Dependency File, included by Cloudmetrics.mak
+
+..\..\common\FUSION_util\argslib.cpp : \
+	"..\..\common\FUSION_util\argslib.h"\
+	
+
+.\Cloudmetrics.cpp : \
+	"..\..\common\FUSION_util\argslib.h"\
+	"..\..\common\FUSION_util\DataCatalogEntry.h"\
+	"..\..\common\FUSION_util\DataFile.h"\
+	"..\..\common\FUSION_util\DataIndex.h"\
+	"..\..\common\FUSION_util\filespec.h"\
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	"..\..\common\FUSION_util\LidarData.h"\
+	"..\..\common\FUSION_util\plansdtm.h"\
+	"..\..\common\ltk\command_line_core_functions.cpp"\
+	"..\..\common\ltk\command_line_core_functions.h"\
+	"..\..\fusion\versionid.h"\
+	".\Cloudmetrics.h"\
+	
+
+..\..\common\FUSION_util\DataCatalogEntry.cpp : \
+	"..\..\common\FUSION_util\DataCatalogEntry.h"\
+	
+
+..\..\common\FUSION_util\DataFile.cpp : \
+	"..\..\common\FUSION_util\DataFile.h"\
+	
+
+..\..\common\FUSION_util\DataIndex.cpp : \
+	"..\..\common\FUSION_util\DataFile.h"\
+	"..\..\common\FUSION_util\DataIndex.h"\
+	"..\..\common\FUSION_util\filespec.h"\
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	"..\..\common\FUSION_util\LidarData.h"\
+	
+
+..\..\common\FUSION_util\filespec.cpp : \
+	"..\..\common\FUSION_util\filespec.h"\
+	
+
+..\..\common\FUSION_util\LASFormatFile.cpp : \
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	
+
+..\..\common\FUSION_util\LidarData.cpp : \
+	"..\..\common\FUSION_util\DataFile.h"\
+	"..\..\common\FUSION_util\DataIndex.h"\
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	"..\..\common\FUSION_util\LidarData.h"\
+	
+
+..\..\common\FUSION_util\plansdtm.cpp : \
+	"..\..\common\FUSION_util\plansdtm.h"\
+	
+
+.\StdAfx.cpp : \
+	"..\..\..\..\program files\microsoft visual studio\vc98\include\basetsd.h"\
+	".\StdAfx.h"\
+	

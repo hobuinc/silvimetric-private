@@ -1,0 +1,155 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: Cloudmetrics - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating command line "rc.exe /l 0x409 /fo"Release/Cloudmetrics.res" /d "NDEBUG" /d "_AFXDLL" "G:\Bob's Stuff\Code\FUSION_Metrics\Cloudmetrics\Cloudmetrics.rc"" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55AF.tmp" with contents
+[
+/nologo /MD /W3 /GX /Od /I "..\common\FUSION_util" /I "..\..\common\FUSION_util" /I "..\..\common\LTK" /I "\Bob's Stuff\Code from other people\lastools_latest" /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "_MBCS" /D "_AFXDLL" /Fp"Release/Cloudmetrics.pch" /Yu"stdafx.h" /Fo"Release/" /Fd"Release/" /FD /c 
+"G:\Bob's Stuff\Code\common\FUSION_util\argslib.cpp"
+"G:\Bob's Stuff\Code\FUSION_Metrics\Cloudmetrics\Cloudmetrics.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\DataCatalogEntry.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\DataFile.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\DataIndex.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\filespec.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\LASFormatFile.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\LidarData_LASlib.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\plansdtm.cpp"
+]
+Creating command line "cl.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55AF.tmp" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55C0.tmp" with contents
+[
+/nologo /MD /W3 /GX /Od /I "..\common\FUSION_util" /I "..\..\common\FUSION_util" /I "..\..\common\LTK" /I "\Bob's Stuff\Code from other people\lastools_latest" /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "_MBCS" /D "_AFXDLL" /Fo"Release/" /Fd"Release/" /FD /c 
+"G:\Bob's Stuff\Code from other people\lastools_latest\laszip_api.c"
+]
+Creating command line "cl.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55C0.tmp" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55C1.tmp" with contents
+[
+/nologo /MD /W3 /GX /Od /I "..\common\FUSION_util" /I "..\..\common\FUSION_util" /I "..\..\common\LTK" /I "\Bob's Stuff\Code from other people\lastools_latest" /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "_MBCS" /D "_AFXDLL" /Fp"Release/Cloudmetrics.pch" /Yc"stdafx.h" /Fo"Release/" /Fd"Release/" /FD /c 
+"G:\Bob's Stuff\Code\FUSION_Metrics\Cloudmetrics\StdAfx.cpp"
+]
+Creating command line "cl.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55C1.tmp" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55C2.tmp" with contents
+[
+/nologo /subsystem:console /incremental:no /pdb:"Release/cloudmetrics.pdb" /machine:I386 /nodefaultlib:"LIBC" /out:"\fusion_demo\cloudmetrics.exe" 
+".\Release\argslib.obj"
+".\Release\Cloudmetrics.obj"
+".\Release\DataCatalogEntry.obj"
+".\Release\DataFile.obj"
+".\Release\DataIndex.obj"
+".\Release\filespec.obj"
+".\Release\LASFormatFile.obj"
+".\Release\laszip_api.obj"
+".\Release\LidarData_LASlib.obj"
+".\Release\plansdtm.obj"
+".\Release\StdAfx.obj"
+".\Release\Cloudmetrics.res"
+]
+Creating command line "link.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP55C2.tmp"
+<h3>Output Window</h3>
+Compiling resources...
+Compiling...
+StdAfx.cpp
+Compiling...
+argslib.cpp
+Cloudmetrics.cpp
+DataCatalogEntry.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+DataFile.cpp
+DataIndex.cpp
+filespec.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+LASFormatFile.cpp
+LidarData_LASlib.cpp
+plansdtm.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+Generating Code...
+Compiling...
+laszip_api.c
+Linking...
+
+
+
+<h3>Results</h3>
+cloudmetrics.exe - 0 error(s), 0 warning(s)
+<h3>
+--------------------Configuration: GridMetrics - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating command line "rc.exe /l 0x409 /fo"Release/GridMetrics.res" /d "NDEBUG" /d "_AFXDLL" "G:\Bob's Stuff\Code\FUSION_Metrics\GridMetrics\GridMetrics.rc"" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E4E.tmp" with contents
+[
+/nologo /MD /W3 /GX /Od /I "..\..\common\array2d" /I "..\..\common\FUSION_util" /I "..\..\common\LTK" /I "..\..\common\TerrainSet" /I "..\..\common\image" /I "\Bob's Stuff\Code from other people\lastools_latest" /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /D "_MBCS" /D "_AFXDLL" /FR"Release/" /Fp"Release/GridMetrics.pch" /Yu"stdafx.h" /Fo"Release/" /Fd"Release/" /FD /c 
+"G:\Bob's Stuff\Code\common\FUSION_util\argslib.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\DataFile.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\DataIndex.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\filespec.cpp"
+"G:\Bob's Stuff\Code\FUSION_Metrics\GridMetrics\GridMetrics.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\LASFormatFile.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\LidarData_LASlib.cpp"
+"G:\Bob's Stuff\Code\common\FUSION_util\plansdtm.cpp"
+"G:\Bob's Stuff\Code\common\TerrainSet\TerrainSet.cpp"
+]
+Creating command line "cl.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E4E.tmp" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E5F.tmp" with contents
+[
+/nologo /MD /W3 /GX /Od /I "..\..\common\array2d" /I "..\..\common\FUSION_util" /I "..\..\common\LTK" /I "..\..\common\TerrainSet" /I "..\..\common\image" /I "\Bob's Stuff\Code from other people\lastools_latest" /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /D "_MBCS" /D "_AFXDLL" /FR"Release/" /Fo"Release/" /Fd"Release/" /FD /c 
+"G:\Bob's Stuff\Code from other people\lastools_latest\laszip_api.c"
+]
+Creating command line "cl.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E5F.tmp" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E60.tmp" with contents
+[
+/nologo /MD /W3 /GX /Od /I "..\..\common\array2d" /I "..\..\common\FUSION_util" /I "..\..\common\LTK" /I "..\..\common\TerrainSet" /I "..\..\common\image" /I "\Bob's Stuff\Code from other people\lastools_latest" /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /D "_MBCS" /D "_AFXDLL" /FR"Release/" /Fp"Release/GridMetrics.pch" /Yc"stdafx.h" /Fo"Release/" /Fd"Release/" /FD /c 
+"G:\Bob's Stuff\Code\FUSION_Metrics\GridMetrics\StdAfx.cpp"
+]
+Creating command line "cl.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E60.tmp" 
+Creating temporary file "C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E61.tmp" with contents
+[
+..\..\common\image\tlib.lib ..\..\common\jpeg-7\libjpeg.lib /nologo /subsystem:console /incremental:no /pdb:"Release/gridmetrics.pdb" /machine:I386 /out:"\fusion_demo\gridmetrics.exe" /out:"/fusion_demo/GridMetrics.exe" 
+".\Release\argslib.obj"
+".\Release\DataFile.obj"
+".\Release\DataIndex.obj"
+".\Release\filespec.obj"
+".\Release\GridMetrics.obj"
+".\Release\LASFormatFile.obj"
+".\Release\laszip_api.obj"
+".\Release\LidarData_LASlib.obj"
+".\Release\plansdtm.obj"
+".\Release\StdAfx.obj"
+".\Release\TerrainSet.obj"
+".\Release\GridMetrics.res"
+]
+Creating command line "link.exe @C:\Users\BMCGAU~1\AppData\Local\Temp\1\RSP5E61.tmp"
+<h3>Output Window</h3>
+Compiling resources...
+Compiling...
+StdAfx.cpp
+Compiling...
+argslib.cpp
+DataFile.cpp
+DataIndex.cpp
+filespec.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+GridMetrics.cpp
+LASFormatFile.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+LidarData_LASlib.cpp
+plansdtm.cpp
+*****Using PNW code and/or LASzip DLL for LAS access...
+TerrainSet.cpp
+Generating Code...
+Compiling...
+laszip_api.c
+Linking...
+
+
+
+<h3>Results</h3>
+gridmetrics.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

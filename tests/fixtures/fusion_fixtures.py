@@ -1,5 +1,6 @@
 import os
 import datetime
+from pathlib import Path
 import pytest
 
 import pyproj
@@ -7,6 +8,11 @@ from osgeo import gdal
 import numpy as np
 
 import silvimetric as sm
+from fusion_gridmetrics import (
+    configured_gridmetrics_command,
+    generate_fusion_gridmetrics,
+    generated_metric_map,
+)
 
 
 @pytest.fixture(scope='function')
@@ -37,13 +43,22 @@ def fusion_data(fusion_data_path: str):
 @pytest.fixture(scope='function')
 def plumas_storage_config(tmp_path_factory: pytest.TempPathFactory):
     crs = pyproj.CRS.from_epsg(26910)
-    bounds = sm.Bounds(minx=635547, maxx=635847, miny=4402347.17, maxy=4402805)
+    # Match the /grid extent used to create the checked-in FUSION rasters.
+    # Keeping the origin and 30 m cell boundaries identical makes a direct
+    # cell-by-cell comparison possible rather than a padded overlap check.
+    bounds = sm.Bounds(
+        minx=635535,
+        maxx=635865,
+        miny=4402335,
+        maxy=4402815,
+    )
     gms = sm.grid_metrics.get_grid_metrics('Z', 2, 2).values()
     attr_names = ['Z', 'Intensity', 'NumberOfReturns', 'ReturnNumber']
     attrs = [a for k, a in sm.Attributes.items() if k in attr_names]
     pl_tdb_dir = tmp_path_factory.mktemp('plumas_tdb').as_posix()
     sc = sm.StorageConfig(
         root=bounds,
+        resolution=30,
         crs=crs,
         metrics=gms,
         attrs=attrs,
@@ -89,12 +104,45 @@ def plumas_tif_dir(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(scope='function')
+def generated_fusion_dir(
+    plumas_data_path: str, tmp_path_factory: pytest.TempPathFactory
+):
+    """Generate a fresh FUSION source baseline when GridMetrics is available.
+
+    The regular test suite uses the checked-in reference rasters. Developers
+    with FUSION can export ``FUSION_GRIDMETRICS`` to an executable or wrapper
+    command and have the same test regenerate its source metrics first.
+    """
+    executable = configured_gridmetrics_command()
+    if executable is None:
+        yield None
+        return
+    output_dir = tmp_path_factory.mktemp('fusion_gridmetrics')
+    yield generate_fusion_gridmetrics(
+        executable, Path(plumas_data_path), Path(output_dir)
+    )
+
+
+@pytest.fixture(scope='function')
 def plumas_cover_file(plumas_tif_dir: str):
     yield os.path.join(plumas_tif_dir, 'm_Z_allcover.tif')
 
 
 @pytest.fixture(scope='function')
-def metric_map(plumas_tif_dir: str, fusion_tif_dir: str):
+def metric_map(
+    plumas_tif_dir: str,
+    fusion_tif_dir: str,
+    generated_fusion_dir,
+):
+    if generated_fusion_dir is not None:
+        yield {
+            str(fusion_path): str(silvimetric_path)
+            for fusion_path, silvimetric_path in generated_metric_map(
+                generated_fusion_dir, Path(plumas_tif_dir)
+            ).items()
+        }
+        return
+
     mapping = {
         'elev_AAD_2plus_30METERS.tif': 'm_Z_aad.tif',
         'elev_CV_2plus_30METERS.tif': 'm_Z_cv.tif',

@@ -1,0 +1,86 @@
+# Microsoft Developer Studio Generated Dependency File, included by GridMetrics.mak
+
+..\..\common\FUSION_util\argslib.cpp : \
+	"..\..\common\FUSION_util\argslib.h"\
+	
+
+..\..\common\FUSION_util\cdib.cpp : \
+	"..\..\common\FUSION_util\cdib.h"\
+	
+
+..\..\common\FUSION_util\DataFile.cpp : \
+	"..\..\common\FUSION_util\DataFile.h"\
+	
+
+..\..\common\FUSION_util\DataIndex.cpp : \
+	"..\..\common\FUSION_util\DataFile.h"\
+	"..\..\common\FUSION_util\DataIndex.h"\
+	"..\..\common\FUSION_util\filespec.h"\
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	"..\..\common\FUSION_util\LidarData.h"\
+	
+
+..\..\common\FUSION_util\filespec.cpp : \
+	"..\..\common\FUSION_util\filespec.h"\
+	
+
+.\GridMetrics.cpp : \
+	"..\..\common\array2d\array2dtemplate.h"\
+	"..\..\common\FUSION_util\argslib.h"\
+	"..\..\common\FUSION_util\cdib.h"\
+	"..\..\common\FUSION_util\DataFile.h"\
+	"..\..\common\FUSION_util\DataIndex.h"\
+	"..\..\common\FUSION_util\filespec.h"\
+	"..\..\common\FUSION_util\image.h"\
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	"..\..\common\FUSION_util\LidarData.h"\
+	"..\..\common\FUSION_util\plansdtm.h"\
+	"..\..\common\image\tiff.h"\
+	"..\..\common\image\tiffio.h"\
+	"..\..\common\jpeg-7\jconfig.h"\
+	"..\..\common\jpeg-7\jmorecfg.h"\
+	"..\..\common\jpeg-7\jpeglib.h"\
+	"..\..\common\ltk\command_line_core_functions.cpp"\
+	"..\..\common\ltk\command_line_core_functions.h"\
+	"..\..\common\TerrainSet\TerrainSet.h"\
+	"..\..\fusion\datafile.h"\
+	"..\..\fusion\plansdtm.h"\
+	"..\..\fusion\versionid.h"\
+	".\GridMetrics.h"\
+	
+
+..\..\common\FUSION_util\Image.cpp : \
+	"..\..\common\FUSION_util\cdib.h"\
+	"..\..\common\FUSION_util\image.h"\
+	"..\..\common\image\tiff.h"\
+	"..\..\common\image\tiffio.h"\
+	"..\..\common\jpeg-7\jconfig.h"\
+	"..\..\common\jpeg-7\jmorecfg.h"\
+	"..\..\common\jpeg-7\jpeglib.h"\
+	
+
+..\..\common\FUSION_util\LASFormatFile.cpp : \
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	
+
+..\..\common\FUSION_util\LidarData.cpp : \
+	"..\..\common\FUSION_util\DataFile.h"\
+	"..\..\common\FUSION_util\DataIndex.h"\
+	"..\..\common\FUSION_util\LASFormatFile.h"\
+	"..\..\common\FUSION_util\LidarData.h"\
+	
+
+..\..\common\FUSION_util\plansdtm.cpp : \
+	"..\..\common\FUSION_util\plansdtm.h"\
+	
+
+.\StdAfx.cpp : \
+	"..\..\..\..\program files\microsoft visual studio\vc98\include\basetsd.h"\
+	".\StdAfx.h"\
+	
+
+..\..\common\TerrainSet\TerrainSet.cpp : \
+	"..\..\common\TerrainSet\TerrainSet.h"\
+	"..\..\fusion\datafile.h"\
+	"..\..\fusion\plansdtm.h"\
+	

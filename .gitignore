@@ -34,6 +34,7 @@ metrics_aligned/
 autzen-aligned.tdb/
 
 .DS_Store
+LTKCL_master.log
 
 docs/source/conf.py
 *.code-workspace

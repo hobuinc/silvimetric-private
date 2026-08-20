@@ -1,0 +1,51 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 15
+VisualStudioVersion = 15.0.28010.2016
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "GridMetrics", "GridMetrics\GridMetrics.vcxproj", "{B56DF887-7D03-4018-8422-7FFF0DA09C17}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Cloudmetrics", "CloudMetrics\Cloudmetrics.vcxproj", "{D6BE9667-0F89-4744-8072-2959D0785D14}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+		Template|x64 = Template|x64
+		Template|x86 = Template|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Debug|x64.ActiveCfg = Debug|x64
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Debug|x64.Build.0 = Debug|x64
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Debug|x86.ActiveCfg = Debug|Win32
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Debug|x86.Build.0 = Debug|Win32
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Release|x64.ActiveCfg = Release|x64
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Release|x64.Build.0 = Release|x64
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Release|x86.ActiveCfg = Release|Win32
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Release|x86.Build.0 = Release|Win32
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Template|x64.ActiveCfg = Debug|x64
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Template|x64.Build.0 = Debug|x64
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Template|x86.ActiveCfg = Release|Win32
+		{B56DF887-7D03-4018-8422-7FFF0DA09C17}.Template|x86.Build.0 = Release|Win32
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Debug|x64.ActiveCfg = Debug|x64
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Debug|x64.Build.0 = Debug|x64
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Debug|x86.ActiveCfg = Debug|Win32
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Debug|x86.Build.0 = Debug|Win32
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Release|x64.ActiveCfg = Release|x64
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Release|x64.Build.0 = Release|x64
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Release|x86.ActiveCfg = Release|Win32
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Release|x86.Build.0 = Release|Win32
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Template|x64.ActiveCfg = Release|x64
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Template|x64.Build.0 = Release|x64
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Template|x86.ActiveCfg = Release|Win32
+		{D6BE9667-0F89-4744-8072-2959D0785D14}.Template|x86.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9CCE2276-8B31-428B-9874-B795F89EA03B}
+	EndGlobalSection
+EndGlobal

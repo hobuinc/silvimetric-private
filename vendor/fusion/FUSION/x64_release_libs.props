@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup />
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>G:\Bob's Stuff\Code from other people\shapelib141\x64\Release\shapelib.lib;G:\Bob's Stuff\Code\common\image\x64\libjpeg.lib;G:\Bob's Stuff\Code\common\image\x64\libtiff.lib;G:\Bob's Stuff\Code\gctpc\x64\Release\gctpc64.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup />
+</Project>
