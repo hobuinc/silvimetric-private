@@ -120,6 +120,33 @@ class StorageConfig(Config):
                 ' projected coordinate system'
             )
 
+        # Point dimensions used by a metric (including its dependencies) must
+        # be retained in the variable-length arrays so shatter can evaluate
+        # the graph.  This makes GridMetrics' RGB/NIR selection usable without
+        # requiring callers to manually mirror ``intensity_key`` in ``attrs``.
+        present = {attribute.name for attribute in self.attrs}
+        visited: set[int] = set()
+
+        def add_metric_attributes(metric: Metric) -> None:
+            identifier = id(metric)
+            if identifier in visited:
+                return
+            visited.add(identifier)
+            for attribute in metric.attributes:
+                if attribute.name not in present:
+                    self.attrs.append(attribute)
+                    present.add(attribute.name)
+            for dependency in metric.dependencies:
+                if isinstance(dependency, Attribute):
+                    if dependency.name not in present:
+                        self.attrs.append(dependency)
+                        present.add(dependency.name)
+                else:
+                    add_metric_attributes(dependency)
+
+        for metric in self.metrics:
+            add_metric_attributes(metric)
+
     def __eq__(self, other):
         # We don't compare logs
         for k in other.__dict__.keys():

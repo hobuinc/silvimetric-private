@@ -121,16 +121,26 @@ class Storage:
         config.xsize = xsize
         config.ysize = ysize
 
+        # GDAL's TileDB raster driver reads complete TileDB tile blocks.  The
+        # georeferenced raster extent may end partway through its final block
+        # (for example a 901-cell collection with 256-cell tiles).  Pad the
+        # *physical* dense domain to that block boundary, while the GDAL PAM
+        # metadata continues to advertise the true root extent.  The padded
+        # cells retain their attribute fill/nodata values and are outside all
+        # normal Silvimetric bounds queries.
+        padded_xi = ((xi + 1 + xsize - 1) // xsize) * xsize - 1
+        padded_yi = ((yi + 1 + ysize - 1) // ysize) * ysize - 1
+
         dim_row = tiledb.Dim(
             name='X',
-            domain=(0, xi),
+            domain=(0, padded_xi),
             dtype=np.uint64,
             tile=xsize,
             filters=tiledb.FilterList([tiledb.ZstdFilter(level = 7)]),
         )
         dim_col = tiledb.Dim(
             name='Y',
-            domain=(0, yi),
+            domain=(0, padded_yi),
             dtype=np.uint64,
             tile=ysize,
             filters=tiledb.FilterList([tiledb.ZstdFilter(level = 7)]),

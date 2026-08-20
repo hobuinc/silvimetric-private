@@ -52,13 +52,17 @@ def confirm_one_entry(storage, maxy, base, pointcount):
         assert vals.Z.shape[0] == shape
         xdom = int(a.schema.domain.dim('X').domain[1])
         ydom = int(a.schema.domain.dim('Y').domain[1])
-        assert xdom == xysize
-        assert ydom == xysize
+        xtile = int(a.schema.domain.dim('X').tile)
+        ytile = int(a.schema.domain.dim('Y').tile)
+        assert xdom == ((xysize + 1 + xtile - 1) // xtile) * xtile - 1
+        assert ydom == ((xysize + 1 + ytile - 1) // ytile) * ytile - 1
         assert vals['count'].sum() == pc
         val_const = ceil(maxy / storage.config.resolution)
 
-        for xi in range(xdom):
-            for yi in range(ydom):
+        # The physical TileDB domain includes padded final blocks for GDAL,
+        # while shatter writes only the logical Silvimetric extent.
+        for xi in range(xysize):
+            for yi in range(xysize):
                 z = vals.loc[xi, yi].Z
                 zmean = vals.loc[xi, yi].m_Z_mean
                 if isinstance(z, np.ndarray):

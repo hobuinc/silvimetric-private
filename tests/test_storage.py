@@ -6,6 +6,7 @@ import copy
 
 from silvimetric import (
     Storage,
+    Bounds,
     all_metrics,
     Attribute,
     Attributes,
@@ -82,13 +83,9 @@ class Test_Storage(object):
             ysize=5
         )
 
-        with pytest.raises(ValueError) as e:
-            Storage.create(sc)
-        assert str(e.value) == 'Missing required dependency, HeightAboveGround.'
-
-        ms[0].dependencies = [Attributes['NumberOfReturns']]
         s = Storage.create(sc)
         assert isinstance(s, Storage)
+        assert 'HeightAboveGround' in {attribute.name for attribute in sc.attrs}
 
         ms[0].dependencies = []
 
@@ -123,6 +120,22 @@ class Test_Storage(object):
         assert s.config.xsize == 12
         assert a.schema.domain.dim('Y').tile == 12
         assert s.config.ysize == 12
+
+    def test_gdal_edge_blocks_are_physically_padded(self, tmp_path, crs):
+        """Dense domains include a final full GDAL/TileDB block for reads."""
+        storage = Storage.create(
+            StorageConfig(
+                tdb_dir=str(tmp_path / 'gdal-edge.tdb'),
+                crs=crs,
+                resolution=20,
+                root=Bounds(0, 0, 18020, 18020),
+                xsize=256,
+                ysize=256,
+            )
+        )
+        with storage.open('r') as array:
+            assert array.schema.domain.dim('X').domain == (0, 1023)
+            assert array.schema.domain.dim('Y').domain == (0, 1023)
 
 
     def test_metrics(self, storage: Storage):
