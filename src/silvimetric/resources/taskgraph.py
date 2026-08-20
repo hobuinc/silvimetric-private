@@ -54,7 +54,7 @@ class Node:
     def __init__(self, metric, graph):
         self.metric = metric
         self.graph = graph
-        self.dependencies: set[Node] = ()
+        self.dependencies: list[Node] = []
         self.results = None
         self.initialized = False
 
@@ -77,7 +77,9 @@ class Node:
                 depnode.init()
                 nodes.append(depnode)
 
-        self.dependencies = set(nodes)
+        # Dependency order is part of the Metric method contract. A set made
+        # argument ordering non-deterministic for metrics with multiple inputs.
+        self.dependencies = nodes
         self.initialized = True
 
         return self
