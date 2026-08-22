@@ -11,6 +11,9 @@ permissions:
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
   AWS_DEFAULT_REGION: us-west-2
+  # The bucket is intentionally stable; every integration-test database is
+  # isolated below a commit- and run-specific prefix.
+  SILVIMETRIC_TEST_S3_BUCKET: silvimetric
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -21,6 +24,10 @@ jobs:
     name: pytest (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      # uuid4() in the fixture supplies the final component, allowing matrix
+      # jobs and retries to coexist while keeping cleanup scoped.
+      SILVIMETRIC_TEST_S3_PREFIX: test_silvimetric/ci/${{ github.sha }}/${{ github.run_id }}-${{ github.run_attempt }}
     defaults:
       run:
         shell: bash -el {0}
@@ -55,10 +62,21 @@ jobs:
           python -m pip list
           micromamba list
 
+      - name: Report S3 integration-test capability
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SILVIMETRIC_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SILVIMETRIC_SECRET_ACCESS_KEY }}
+        run: |
+          if [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]]; then
+            echo "S3 integration credential found; remote shatter test will use s3://${SILVIMETRIC_TEST_S3_BUCKET}/${SILVIMETRIC_TEST_S3_PREFIX}/<uuid>."
+          else
+            echo "::notice::No SILVIMETRIC_ACCESS_KEY_ID/SILVIMETRIC_SECRET_ACCESS_KEY secrets are configured; the credential-gated S3 integration test will be skipped."
+          fi
+
       - name: Run full test suite
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SM_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SM_AWS_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.SILVIMETRIC_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SILVIMETRIC_SECRET_ACCESS_KEY }}
         run: python -m pytest -vv --durations=25
 
   fusion-gridmetrics:

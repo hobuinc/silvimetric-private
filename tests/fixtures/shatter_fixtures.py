@@ -23,13 +23,18 @@ def s3_copc_filepath() -> Generator[str, None, None]:
 
 @pytest.fixture(scope='function')
 def s3_bucket() -> Generator[str, None, None]:
-    yield 'silvimetric'
+    # CI provides the stable base bucket.  Keeping this configurable makes
+    # the remote integration test usable in another isolated AWS account.
+    yield os.environ.get('SILVIMETRIC_TEST_S3_BUCKET', 'silvimetric')
 
 
 @pytest.fixture(scope='function')
 def s3_uri(s3_bucket: str) -> Generator[str, None, None]:
-    uuid = uuid4()
-    yield f's3://{s3_bucket}/test_silvimetric/{uuid}'
+    prefix = os.environ.get('SILVIMETRIC_TEST_S3_PREFIX', 'test_silvimetric')
+    prefix = prefix.strip('/')
+    # CI prefixes include the source SHA and run identity.  A UUID prevents
+    # collisions between test functions, retries, and concurrent matrix jobs.
+    yield f's3://{s3_bucket}/{prefix}/{uuid4()}'
 
 
 @pytest.fixture(scope='function')
