@@ -14,11 +14,13 @@
 - `.github/workflows/main.yml` is the private CI workflow. It runs on every
   push and pull request, with a manual-dispatch option.
 - The full pytest suite runs on Ubuntu and macOS with Python 3.12 and 3.14.
-  The optional remote S3 test runs only when non-empty AWS credential
-  environment variables are supplied. Ordinary private CI intentionally does
-  not inject the stored `SILVIMETRIC_ACCESS_KEY_ID` and
-  `SILVIMETRIC_SECRET_ACCESS_KEY` secrets, and logs that the test is skipped.
-  When enabled outside ordinary CI, it uses the stable
+  The ordinary matrix intentionally does not inject AWS credentials and logs
+  that its optional remote S3 test is skipped. A separate single
+  `s3-integration` Ubuntu/Python 3.14 job injects
+  `SILVIMETRIC_ACCESS_KEY_ID` and `SILVIMETRIC_SECRET_ACCESS_KEY` and runs
+  only the remote shatter test. The `silvimetric` CI test bucket is in
+  `us-east-1`, so that job overrides the TileDB/AWS region locally; the rest
+  of the project uses `us-west-2`. It uses the stable
   `SILVIMETRIC_TEST_S3_BUCKET` base bucket and a SHA/run-specific prefix plus
   a UUID per test database, so cleanup cannot touch another run's data.
 - A separate Ubuntu/macOS CMake job builds and CTests vendored GridMetrics.

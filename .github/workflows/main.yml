@@ -69,6 +69,53 @@ jobs:
       - name: Run full test suite
         run: python -m pytest -vv --durations=25
 
+  s3-integration:
+    name: S3 remote shatter integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The existing CI test bucket is in us-east-1.  Keep this override local
+      # to the remote test; the rest of the project continues to use us-west-2.
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      SILVIMETRIC_TILEDB_S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${{ secrets.SILVIMETRIC_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SILVIMETRIC_SECRET_ACCESS_KEY }}
+      SILVIMETRIC_TEST_S3_PREFIX: test_silvimetric/ci/${{ github.sha }}/${{ github.run_id }}-${{ github.run_attempt }}
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - name: Checkout source and LFS fixtures
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Create Conda environment
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          init-shell: bash
+          environment-file: environment.yml
+          environment-name: silvimetric
+          create-args: python=3.14
+
+      - name: Install test tools and package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-click awscli
+          python -m pip install .
+
+      - name: Report S3 integration-test capability
+        run: |
+          if [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]]; then
+            echo "S3 integration credential found; remote shatter test will use s3://${SILVIMETRIC_TEST_S3_BUCKET}/${SILVIMETRIC_TEST_S3_PREFIX}/<uuid>."
+          else
+            echo "::notice::S3 integration credentials are absent or empty; the remote shatter test will be skipped."
+          fi
+
+      - name: Run remote shatter integration test
+        run: python -m pytest -vv tests/test_shatter.py::Test_Shatter::test_remote_creation
+
   fusion-gridmetrics:
     name: GridMetrics CMake (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
