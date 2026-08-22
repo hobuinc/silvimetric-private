@@ -63,20 +63,10 @@ jobs:
           micromamba list
 
       - name: Report S3 integration-test capability
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SILVIMETRIC_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SILVIMETRIC_SECRET_ACCESS_KEY }}
         run: |
-          if [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]]; then
-            echo "S3 integration credential found; remote shatter test will use s3://${SILVIMETRIC_TEST_S3_BUCKET}/${SILVIMETRIC_TEST_S3_PREFIX}/<uuid>."
-          else
-            echo "::notice::No SILVIMETRIC_ACCESS_KEY_ID/SILVIMETRIC_SECRET_ACCESS_KEY secrets are configured; the credential-gated S3 integration test will be skipped."
-          fi
+          echo "::notice::This CI run intentionally does not inject S3 credentials; the credential-gated S3 integration test will be skipped."
 
       - name: Run full test suite
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SILVIMETRIC_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SILVIMETRIC_SECRET_ACCESS_KEY }}
         run: python -m pytest -vv --durations=25
 
   fusion-gridmetrics:

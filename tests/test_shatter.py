@@ -509,9 +509,12 @@ class Test_Shatter(object):
         assert pc == actual
 
     @pytest.mark.skipif(
-        os.environ.get('AWS_SECRET_ACCESS_KEY') is None
-        or os.environ.get('AWS_ACCESS_KEY_ID') is None,
-        reason='Missing necessary AWS environment variables',
+        not os.environ.get('AWS_SECRET_ACCESS_KEY')
+        or not os.environ.get('AWS_ACCESS_KEY_ID'),
+        reason=(
+            'S3 integration test requires non-empty AWS_ACCESS_KEY_ID and '
+            'AWS_SECRET_ACCESS_KEY environment variables'
+        ),
     )
     def test_remote_creation(
         self,
