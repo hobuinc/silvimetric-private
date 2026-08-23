@@ -46,13 +46,22 @@ class TestFusion:
             },
         }
         for f_path, sm_path in metric_map.items():
+            name = os.path.basename(f_path)
             # here is where intensity values are turned off
             if 'int' in f_path:
+                print(
+                    f'FUSION comparison metric={name} status=skipped '
+                    'reason=intensity products are not in this baseline check'
+                )
                 continue
 
             # we know modes are slightly different between fusion and sm, so
             # anything that depends on mode will be off
             if 'mode' in f_path:
+                print(
+                    f'FUSION comparison metric={name} status=skipped '
+                    'reason=mode-derived products have a documented mismatch'
+                )
                 continue
 
             # The checked-in legacy reference used a population standard
@@ -60,6 +69,10 @@ class TestFusion:
             # FUSION source's sample-SD calculation; the dedicated
             # FUSION-equivalence unit test covers that formula.
             if '_CV_' in f_path:
+                print(
+                    f'FUSION comparison metric={name} status=skipped '
+                    'reason=legacy baseline uses population standard deviation'
+                )
                 continue
 
             sm_raster = gdal.Open(sm_path)
@@ -75,8 +88,11 @@ class TestFusion:
             # The fixture forces the same 30 m grid origin and extent used by
             # GridMetrics.  Assert exact equality for known matching FUSION
             # count pixels, rather than a tolerance comparison.
-            name = f_path.rsplit('/', 1)[-1]
             if name in exact_count_pixels:
+                print(
+                    f'FUSION comparison metric={name} status=exact-cell '
+                    f'cell={exact_count_pixels[name]}'
+                )
                 assert sm_raster.GetGeoTransform() == f_raster.GetGeoTransform()
                 row, column = exact_count_pixels[name]
                 np.testing.assert_array_equal(
@@ -100,6 +116,8 @@ class TestFusion:
             if 'cover' in f_path:
                 # make sure cover differences are less than 5%
                 tester = np.nan_to_num(diff_data, 0) >= 5
+                threshold = 'absolute >= 5 percentage points'
+                comparison_data = diff_data
                 if np.any(tester):
                     if diff_data[tester].size > 5:
                         failures.append(sm_path)
@@ -114,6 +132,8 @@ class TestFusion:
             ):
                 # make sure elevation differences are less than 0.2 meters
                 tester = np.nan_to_num(diff_data, 0) >= 0.2
+                threshold = 'absolute >= 0.2 meters'
+                comparison_data = diff_data
                 if np.any(tester):
                     if diff_data[tester].size > 5:
                         failures.append(sm_path)
@@ -128,12 +148,41 @@ class TestFusion:
             else:
                 # make sure others are off by less than 5%
                 tester = pct_change > 0.05
+                threshold = 'relative > 5 percent'
+                comparison_data = pct_change
                 if np.any(tester):
                     # only add if a significant number of cells are off
                     if pct_change[tester].size > 5:
                         failures.append(sm_path)
                         failure_cell_count.append(pct_change[tester].size)
                         failure_cell_avg.append(pct_change[tester].mean())
+
+            valid = np.isfinite(padded_fusion) & np.isfinite(sm_raster_data)
+            finite_differences = diff_data[valid]
+            finite_comparisons = comparison_data[valid]
+            max_abs = (
+                float(finite_differences.max())
+                if finite_differences.size else float('nan')
+            )
+            mean_abs = (
+                float(finite_differences.mean())
+                if finite_differences.size else float('nan')
+            )
+            max_comparison = (
+                float(finite_comparisons.max())
+                if finite_comparisons.size else float('nan')
+            )
+            print(
+                'FUSION comparison '
+                f'metric={name} status=compared threshold="{threshold}" '
+                f'fusion_shape={f_raster_data.shape} '
+                f'silvimetric_shape={sm_raster_data.shape} '
+                f'valid_cells={int(valid.sum())} '
+                f'differing_cells={int(tester.sum())} '
+                f'max_abs_difference={max_abs:.9g} '
+                f'mean_abs_difference={mean_abs:.9g} '
+                f'max_threshold_value={max_comparison:.9g}'
+            )
 
         for idx, f in enumerate(failures):
             print('Failed:')

@@ -22,6 +22,7 @@ concurrency:
 jobs:
   test:
     name: pytest (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    needs: fusion-gridmetrics
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -56,6 +57,15 @@ jobs:
           python -m pip install pytest pytest-click awscli
           python -m pip install .
 
+      - name: Download matching GridMetrics build
+        uses: actions/download-artifact@v4
+        with:
+          name: gridmetrics-${{ matrix.os }}
+          path: build/fusion-gridmetrics
+
+      - name: Prepare GridMetrics verification executable
+        run: chmod +x build/fusion-gridmetrics/GridMetrics
+
       - name: Report test environment
         run: |
           python --version
@@ -67,10 +77,25 @@ jobs:
           echo "::notice::This CI run intentionally does not inject S3 credentials; the credential-gated S3 integration test will be skipped."
 
       - name: Run full test suite
-        run: python -m pytest -vv --durations=25
+        env:
+          FUSION_GRIDMETRICS: ${{ github.workspace }}/build/fusion-gridmetrics/GridMetrics
+          FUSION_GRIDMETRICS_OUTPUT_DIR: ${{ github.workspace }}/build/fusion-verification
+        run: python -m pytest -vv -s --durations=25
+
+      - name: Upload generated FUSION verification rasters
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-verification-${{ matrix.os }}-python-${{ matrix.python-version }}
+          path: |
+            build/fusion-verification/fusion_*_metrics_*.asc
+            build/fusion-verification/fusion-gridmetrics-manifest.json
+          if-no-files-found: warn
+          retention-days: 7
 
   s3-integration:
     name: S3 remote shatter integration
+    needs: fusion-gridmetrics
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -139,3 +164,11 @@ jobs:
 
       - name: Run GridMetrics CTest smoke test
         run: ctest --test-dir build/fusion-gridmetrics --output-on-failure
+
+      - name: Upload GridMetrics executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: gridmetrics-${{ matrix.os }}
+          path: build/fusion-gridmetrics/GridMetrics
+          if-no-files-found: error
+          retention-days: 1

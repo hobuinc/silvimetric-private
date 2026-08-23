@@ -109,15 +109,22 @@ def generated_fusion_dir(
 ):
     """Generate a fresh FUSION source baseline when GridMetrics is available.
 
-    The regular test suite uses the checked-in reference rasters. Developers
-    with FUSION can export ``FUSION_GRIDMETRICS`` to an executable or wrapper
-    command and have the same test regenerate its source metrics first.
+    CI supplies the executable built from ``vendor/fusion`` through
+    ``FUSION_GRIDMETRICS``. Developers can export the same variable to an
+    executable or wrapper command. ``FUSION_GRIDMETRICS_OUTPUT_DIR`` keeps
+    regenerated source metrics for inspection; otherwise pytest uses a
+    temporary directory.
     """
     executable = configured_gridmetrics_command()
     if executable is None:
         yield None
         return
-    output_dir = tmp_path_factory.mktemp('fusion_gridmetrics')
+    output_path = os.environ.get('FUSION_GRIDMETRICS_OUTPUT_DIR')
+    output_dir = (
+        Path(output_path)
+        if output_path
+        else tmp_path_factory.mktemp('fusion_gridmetrics')
+    )
     yield generate_fusion_gridmetrics(
         executable, Path(plumas_data_path), Path(output_dir)
     )

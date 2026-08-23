@@ -1,9 +1,9 @@
 """Reproducible FUSION GridMetrics source-baseline support.
 
-FUSION is a Windows application and is intentionally not a CI dependency.
-Set ``FUSION_GRIDMETRICS`` to an executable or wrapper command (for example a
-Wine wrapper) to generate a fresh baseline from the LFS COPC fixture.  The
-normal test suite continues to use the checked-in reference rasters.
+CI builds the vendored portable GridMetrics executable and supplies it through
+``FUSION_GRIDMETRICS``. Developers can set the same variable to an executable
+or wrapper command. ``FUSION_GRIDMETRICS_OUTPUT_DIR`` preserves a regenerated
+baseline for inspection; otherwise pytest creates a temporary output folder.
 """
 
 from __future__ import annotations

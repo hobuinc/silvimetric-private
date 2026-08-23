@@ -23,7 +23,11 @@
   of the project uses `us-west-2`. It uses the stable
   `SILVIMETRIC_TEST_S3_BUCKET` base bucket and a SHA/run-specific prefix plus
   a UUID per test database, so cleanup cannot touch another run's data.
-- A separate Ubuntu/macOS CMake job builds and CTests vendored GridMetrics.
+- The Ubuntu/macOS CMake matrix builds and CTests vendored GridMetrics first.
+  It publishes one executable artifact per OS. All pytest and S3 jobs depend
+  on this build; pytest downloads the matching executable, regenerates the
+  FUSION ASCII verification rasters, compares Silvimetric output against
+  them, and uploads the generated rasters plus manifest for seven days.
   Keep this workflow private-only; do not duplicate it into a public repo.
 
 ## FUSION metric alignment
@@ -35,10 +39,12 @@
 - Each GridMetrics metric carries FUSION provenance/definition metadata via
   `fusion_metadata.py`. The main mapping and audit are in
   `FUSION-SM-ATTRIBUTE-BREAKDOWN.md` and `FUSION-SM-GAP-ANALYSIS.md`.
-- The ordinary checked-in FUSION baseline is deterministic and passing. A
-  fresh native FUSION run is opt-in through `FUSION_GRIDMETRICS`; differences
-  it reports are diagnostic until source selection and `/minht` + `/minpts`
-  eligibility semantics have a fully recorded pixel-equality baseline.
+- CI supplies `FUSION_GRIDMETRICS` from the matching CMake artifact and
+  enables a fresh source baseline on every pytest job. `test_fusion.py` logs
+  every compared metric's shapes, valid/differing-cell counts, and difference
+  statistics. Fresh-baseline discrepancies are required verification signals
+  until source selection and `/minht` + `/minpts` eligibility semantics have
+  a fully recorded pixel-equality baseline.
 
 ## Native GridMetrics build
 

@@ -4,14 +4,16 @@
 canonical source fixture. It is tracked by Git LFS with SHA-256
 `6912665fcd0d807c22f74a2682f1e8e9a3a232a853ee6dbc13584bf5af0b2a36`.
 
-The checked-in rasters keep the normal test suite self-contained. For a fresh
-source baseline, build the vendored native `GridMetrics` target for macOS or
-Linux, configure its path, and run the FUSION test:
+CI builds the vendored native `GridMetrics` target for macOS and Linux before
+pytest starts. It downloads the matching executable, creates a fresh source
+baseline, compares Silvimetric output against it, and retains the generated
+ASCII rasters and manifest as a CI artifact. To reproduce that path locally:
 
 ```shell
 cmake -S vendor/fusion -B build/fusion-gridmetrics -DCMAKE_BUILD_TYPE=Release
 cmake --build build/fusion-gridmetrics --parallel
 export FUSION_GRIDMETRICS="$PWD/build/fusion-gridmetrics/GridMetrics"
+export FUSION_GRIDMETRICS_OUTPUT_DIR="$PWD/build/fusion-verification"
 python -m pytest tests/test_fusion.py -q
 ```
 
@@ -26,9 +28,8 @@ GridMetrics configuration:
   supplies `635835,4402785` to produce this outside-edge extent;
 - `/ascii` plus the raster products used by the Silvimetric comparison.
 
-The temporary `fusion-gridmetrics-manifest.json` records the exact executable
-command, input SHA-256, stdout, and stderr for an externally generated run.
-Any comparison failures from this opt-in regenerated baseline are intentional
-signals of a remaining FUSION/Silvimetric metric discrepancy; the checked-in
-baseline keeps the ordinary test suite deterministic while those gaps are
-closed.
+The `fusion-gridmetrics-manifest.json` records the exact executable command,
+input SHA-256, stdout, and stderr. CI logs a line for every metric comparison
+with grid dimensions, valid and differing cell counts, and difference
+statistics. A source-baseline discrepancy is an intentional verification
+signal of remaining FUSION/Silvimetric incompatibility.
