@@ -42,9 +42,12 @@
 - CI supplies `FUSION_GRIDMETRICS` from the matching CMake artifact and
   enables a fresh source baseline on every pytest job. `test_fusion.py` logs
   every compared metric's shapes, valid/differing-cell counts, and difference
-  statistics. Fresh-baseline discrepancies are required verification signals
-  until source selection and `/minht` + `/minpts` eligibility semantics have
-  a fully recorded pixel-equality baseline.
+  statistics. The FUSION harness uses `/gridxy` cell centers and `/buffer:15`
+  so that its source point population matches Silvimetric's 30 m edge-based
+  cells. It asserts pixel-exact population/count products and tolerance-based
+  equality for floating summaries. FUSION's ASCII cover rasters are converted
+  from fractions to the percentage convention used by its CSV/LDV products;
+  its known `95m05` raster-writer P90-P10 defect is explicitly skipped.
 
 ## Native GridMetrics build
 

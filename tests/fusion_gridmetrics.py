@@ -18,11 +18,14 @@ import subprocess
 
 
 FUSION_GRIDMETRICS_ENV = 'FUSION_GRIDMETRICS'
-# Desired output extent. GridMetrics treats the maximum /gridxy coordinate as
-# the lower-left corner of one more cell, while Silvimetric's storage bounds
-# are the outside edge of the last cell.  The command below therefore submits
-# a maximum one cell inside this extent.
-FUSION_GRID = (635535.0, 4402335.0, 635865.0, 4402815.0)
+# Desired output cell centers.  GridMetrics treats the coordinates provided to
+# /gridxy as cell centers, while Silvimetric's storage bounds are cell edges.
+# Its /buffer option reads one surrounding cell while retaining only this
+# requested grid in the output.  That makes FUSION's per-cell point population
+# identical to Silvimetric's half-open [edge, edge + cellsize) bins, including
+# the outer row and column.
+FUSION_GRID = (635550.0, 4402350.0, 635850.0, 4402800.0)
+FUSION_BUFFER = 15.0
 FUSION_HEIGHT_BREAK = 2.0
 FUSION_MINIMUM_HEIGHT = 2.0
 FUSION_MINIMUM_POINTS = 3
@@ -110,15 +113,13 @@ def gridmetrics_command(
     Windows builds accept the same invocation.
     """
     minx, miny, maxx, maxy = FUSION_GRID
-    grid = ','.join(
-        str(int(value))
-        for value in (minx, miny, maxx - FUSION_CELL_SIZE, maxy - FUSION_CELL_SIZE)
-    )
+    grid = ','.join(str(int(value)) for value in (minx, miny, maxx, maxy))
     return [
         *executable,
         '/noground',
         '/nointdtm',
         '/ascii',
+        f'/buffer:{FUSION_BUFFER:g}',
         f'/minht:{FUSION_MINIMUM_HEIGHT:g}',
         f'/minpts:{FUSION_MINIMUM_POINTS}',
         f'/gridxy:{grid}',

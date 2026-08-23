@@ -18,9 +18,10 @@ def test_gridmetrics_command_uses_normalized_lfs_source_configuration():
     assert '/noground' in command
     assert '/nointdtm' in command
     assert '/ascii' in command
+    assert '/buffer:15' in command
     assert '/minht:2' in command
     assert '/minpts:3' in command
-    assert '/gridxy:635535,4402335,635835,4402785' in command
+    assert '/gridxy:635550,4402350,635850,4402800' in command
     assert f'/raster:{FUSION_RASTER_PRODUCTS}' in command
     assert command[-4:] == [
         '2',
