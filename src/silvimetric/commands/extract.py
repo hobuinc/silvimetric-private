@@ -70,6 +70,12 @@ def write_tif(
     )
     tif.SetGeoTransform(transform)
     tif.SetProjection(srs.ExportToWkt())
+    # ``transform`` describes the *outer* raster edges, not pixel centers:
+    # pixel (0, 0) is centered one half-cell right/down from (minx, maxy).
+    # State this explicitly so GDAL consumers do not reinterpret the
+    # coordinates as PixelIsPoint (the convention used by FUSION's /gridxy
+    # command-line cell-center arguments).
+    tif.SetMetadataItem('AREA_OR_POINT', 'Area')
     tif.GetRasterBand(1).SetNoDataValue(nan_val)
     tif.GetRasterBand(1).WriteArray(data)
     tif.FlushCache()

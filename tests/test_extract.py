@@ -17,7 +17,6 @@ from silvimetric import (
 
 
 def tif_test(extract_config):
-    minx, _miny, _maxx, maxy = extract_config.bounds.get()
     resolution = extract_config.resolution
     filenames = [
         all_metrics[m.name].entry_name(a.name)
@@ -32,6 +31,7 @@ def tif_test(extract_config):
         storage.config.root,
     )
     root_maxy = storage.config.root.maxy
+    minx, miny, maxx, maxy = e.bounds.get()
 
     for f in filenames:
         if 'Return' in f:
@@ -45,12 +45,30 @@ def tif_test(extract_config):
         assert rminx == minx
         assert rmaxy == maxy
         assert xres == resolution
+        assert xskew == 0
+        assert yskew == 0
         assert -yres == resolution
+        assert raster.GetMetadataItem('AREA_OR_POINT') == 'Area'
 
         assert derived == extract_config.crs
 
         xsize = raster.RasterXSize
         ysize = raster.RasterYSize
+
+        # GeoTIFF's PixelIsArea transform is defined at outer cell edges.
+        # Verify both the full requested extent and the FUSION-compatible
+        # center positions.  A PixelIsPoint transform would put the first
+        # center at (minx, maxy), rather than half a cell inside the bounds.
+        assert np.isclose(rminx + xsize * xres, maxx)
+        assert np.isclose(rmaxy + ysize * yres, miny)
+        assert np.isclose(rminx + xres / 2, minx + resolution / 2)
+        assert np.isclose(rmaxy + yres / 2, maxy - resolution / 2)
+        assert np.isclose(
+            rminx + (xsize - 0.5) * xres, maxx - resolution / 2
+        )
+        assert np.isclose(
+            rmaxy + (ysize - 0.5) * yres, miny + resolution / 2
+        )
 
         r = raster.ReadAsArray()
         assert all(
