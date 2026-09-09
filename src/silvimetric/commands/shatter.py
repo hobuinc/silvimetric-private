@@ -5,6 +5,7 @@ import math
 import os
 import resource
 import sys
+import uuid
 from threading import Event, Thread
 from datetime import datetime
 import copy
@@ -500,6 +501,21 @@ def _shard_name(macros: list[Extents]) -> str:
     )
 
 
+def _stage_attempt_uri(config: ShatterConfig, shard_name: str) -> str:
+    """Return an attempt-local stage path for a macro-v3 shard task.
+
+    A Dask task may be rerun after its worker is killed.  The killed process
+    can leave a partially-created TileDB stage on its host-local disk, so a
+    stable ``shards/<name>.tdb`` path makes a legitimate retry fail before it
+    can do any work.  The published S3 shard name remains stable; only the
+    disposable local stage gains a unique attempt component.
+    """
+    attempt_id = uuid.uuid4().hex
+    return (
+        f'{config.stage_tdb_dir}/attempts/{shard_name}/{attempt_id}.tdb'
+    )
+
+
 def do_macro_to_shard(
     macros: list[Extents], config: ShatterConfig, storage: Storage
 ) -> 'MacroTaskResult':
@@ -511,7 +527,7 @@ def do_macro_to_shard(
     an unbounded number of tiny S3 arrays.
     """
     shard_name = _shard_name(macros)
-    stage_uri = f'{config.stage_tdb_dir}/shards/{shard_name}.tdb'
+    stage_uri = _stage_attempt_uri(config, shard_name)
     publish_uri = f'{config.stage_publish_uri}/shards/{shard_name}'
     stage = Storage.create_stage(storage, stage_uri)
     stage_config = copy.deepcopy(config)

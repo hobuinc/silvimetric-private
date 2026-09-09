@@ -260,6 +260,12 @@ class Test_Shatter(object):
         shatter_config.stage_publish_uri = publish_dir
         shatter_config.stage_fragment_size_mb = 1
         shatter_config.macro_diagnostics = True
+        stage_paths = []
+        create_stage = Storage.create_stage
+
+        def record_stage_path(source, stage_path):
+            stage_paths.append(stage_path)
+            return create_stage(source, stage_path)
 
         def no_address_pinned_partial_tasks(*args, **kwargs):
             pytest.fail(
@@ -275,6 +281,9 @@ class Test_Shatter(object):
             'silvimetric.commands.shatter.finalize_macro_block',
             no_address_pinned_partial_tasks,
         )
+        monkeypatch.setattr(
+            Storage, 'create_stage', staticmethod(record_stage_path)
+        )
 
         shatter(shatter_config)
 
@@ -283,6 +292,11 @@ class Test_Shatter(object):
         # Neighboring macro reads are merged locally before each compact,
         # S3-compatible shard is committed.
         assert published
+        # A killed worker can leave a partial local array behind.  Every
+        # rescheduled block attempt must therefore get a distinct local URI.
+        assert stage_paths
+        assert len(stage_paths) == len(set(stage_paths))
+        assert all('/attempts/' in path for path in stage_paths)
         point_count = sum(
             int(member.open('r').df[:, :]['count'].sum())
             for member in published
