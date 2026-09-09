@@ -248,8 +248,9 @@ class Test_Shatter(object):
         test_point_count: int,
         tmp_path,
         threaded_dask,
+        monkeypatch: pytest.MonkeyPatch,
     ):
-        """Stage-and-push must not write fragments into the source array."""
+        """Stage-and-push uses independent, restart-safe local-stage tasks."""
         stage_dir = (tmp_path / 'stage.tdb').as_posix()
         publish_dir = (tmp_path / 'published.tdb').as_posix()
         shatter_config.tile_size = 1
@@ -259,6 +260,21 @@ class Test_Shatter(object):
         shatter_config.stage_publish_uri = publish_dir
         shatter_config.stage_fragment_size_mb = 1
         shatter_config.macro_diagnostics = True
+
+        def no_address_pinned_partial_tasks(*args, **kwargs):
+            pytest.fail(
+                'macro-v3 must not depend on address-pinned partial/final '
+                'tasks: a Dask worker restart makes them unrunnable'
+            )
+
+        monkeypatch.setattr(
+            'silvimetric.commands.shatter.do_macro_to_partial_stage',
+            no_address_pinned_partial_tasks,
+        )
+        monkeypatch.setattr(
+            'silvimetric.commands.shatter.finalize_macro_block',
+            no_address_pinned_partial_tasks,
+        )
 
         shatter(shatter_config)
 

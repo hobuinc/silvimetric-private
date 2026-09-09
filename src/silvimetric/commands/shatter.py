@@ -919,64 +919,39 @@ def run_macro_to_stage(
         list(macros), config, storage, data
     )
     if dc is not None:
-        workers = sorted(dc.scheduler_info()['workers'])
-        if not workers:
+        if not dc.scheduler_info()['workers']:
             raise RuntimeError('macro-v3 requires at least one Dask worker')
         estimated_points = {
             window['name']: window['estimated_max_points']
             for window in planner.get('windows', [])
         }
-        worker_load = {worker: 0 for worker in workers}
         planned_blocks = sorted(
             macro_blocks,
             key=lambda block: estimated_points.get(_shard_name(block), 0),
             reverse=True,
         )
-        assignments = []
-        futures = []
-        for block in planned_blocks:
-            # Local partial stages require a single finalizer owner, so Dask
-            # cannot work-steal within a block.  Assign the largest estimated
-            # blocks first to the least-loaded worker rather than round-robin
-            # by block count; otherwise a dense final block strands a fleet.
-            owner = min(workers, key=worker_load.__getitem__)
-            block_name = _shard_name(block)
-            block_estimate = estimated_points.get(block_name, 0)
-            worker_load[owner] += block_estimate
-            assignments.append(
-                {
-                    'name': block_name,
-                    'owner': owner,
-                    'estimated_max_points': block_estimate,
-                }
+        # A block owns a local TileDB stage, so it must perform its complete
+        # process -> consolidate -> publish lifecycle on one worker.  Do not
+        # split it into partial tasks then pin a finalizer to a concrete Dask
+        # worker address: a nanny restart changes that address and leaves the
+        # finalizer permanently unrunnable.  One independent block per task
+        # retains Dask work stealing and permits safe recovery on another
+        # worker, while stage paths remain local to the executing task.
+        futures = [
+            dc.submit(
+                do_macro_to_shard,
+                macros=block,
+                config=config,
+                storage=storage,
+                retries=0,
             )
-            partials = [
-                dc.submit(
-                    do_macro_to_partial_stage,
-                    macro=macro,
-                    block_name=block_name,
-                    config=config,
-                    storage=storage,
-                    workers=[owner],
-                    allow_other_workers=False,
-                    retries=0,
-                )
-                for macro in block
-            ]
-            futures.append(
-                dc.submit(
-                    finalize_macro_block,
-                    macro_results=partials,
-                    macros=block,
-                    config=config,
-                    storage=storage,
-                    workers=[owner],
-                    allow_other_workers=False,
-                    retries=0,
-                )
-            )
-        planner['worker_assignments'] = assignments
-        planner['worker_estimated_points'] = worker_load
+            for block in planned_blocks
+        ]
+        planner['distributed_executor'] = {
+            'mode': 'one-local-stage-per-spatial-block',
+            'worker_address_restrictions': False,
+            'block_task_count': len(futures),
+        }
         completed = as_completed(futures, with_results=True, raise_errors=False)
         for future, result in completed:
             if future.status == 'error':
