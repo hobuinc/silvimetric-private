@@ -977,6 +977,29 @@ class Storage:
             )
             consolidated += 1
 
+    def consolidate_canonical_array(self, fragment_size_mb: int) -> None:
+        """Consolidate a concurrently written canonical array safely.
+
+        ``consolidate_stage_plan`` is for a locally owned v3 stage whose
+        writes have deterministic ordering.  It passes an explicit fragment
+        list to TileDB, which is invalid for a shared array when parallel
+        writers commit spatially disjoint data in nondeterministic timestamp
+        order.  Let TileDB choose only valid fragment groups instead, while
+        bounding the resulting fragment size.
+        """
+        target_bytes = int(fragment_size_mb) * 1024 * 1024
+        config = self.get_tdb_context().config()
+        config['sm.consolidation.mode'] = 'fragments'
+        config['sm.consolidation.step_min_frags'] = '2'
+        config['sm.consolidation.step_max_frags'] = '4294967295'
+        config['sm.consolidation.steps'] = '4294967295'
+        config['sm.consolidation.max_fragment_size'] = str(target_bytes)
+        tiledb.consolidate(
+            self.config.tdb_dir,
+            ctx=tiledb.Ctx(config),
+            config=config,
+        )
+
     def publish_stage(self, publish_uri: str, time_slot: int = 1) -> dict:
         """Materialize a validated local stage as a committed S3 array.
 

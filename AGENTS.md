@@ -2,7 +2,7 @@
 
 ## Repository and publishing
 
-- Current working branch: `codex/gdal-metadata-uint8`.
+- Current working branch: `codex/macro-v4-single-array`.
 - `origin` is the private repository, `git@github.com:hobuinc/silvimetric-private.git`.
   Do not add or push to a public Silvimetric remote unless the user explicitly
   directs it.
@@ -75,6 +75,22 @@
   GDAL metadata remain the authoritative outside extent.
 - `StorageConfig` automatically retains point attributes required by metric
   dependencies (including direct Attribute dependencies and RGB/NIR inputs).
+
+## Macro-v4 canonical-array proof
+
+- `macro-v4-single-array` is an intentionally separate proof path. It writes
+  non-overlapping macro cores directly into one pre-created dense TileDB array;
+  workers create internal fragments, not a Group of public spatial shards.
+- It currently accepts only an empty destination array and schedules Dask
+  tasks with `retries=0`: recovery needs an idempotent staging/publish ledger
+  before a production run may retry an uncertain commit.
+- Its canonical-array consolidation lets TileDB select valid fragment groups
+  and sets `sm.consolidation.max_fragment_size`; do not reuse macro-v3's
+  explicit local-stage consolidation plan after concurrent writes, because
+  parallel commit order can make its selected fragment list invalid.
+- Regression coverage in `tests/test_shatter.py` verifies macro-v2-equivalent
+  extraction and two concurrent Dask writers against one array. The next
+  milestone is a bounded S3 run, then safe stage-and-push/idempotent recovery.
 
 ## Validation used for this state
 

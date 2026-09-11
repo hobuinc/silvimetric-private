@@ -314,7 +314,14 @@ def initialize_cmd(
 )
 @click.option(
     '--processing-strategy',
-    type=click.Choice(['leaf-v1', 'macro-v2', 'macro-v3-stage-push']),
+    type=click.Choice(
+        [
+            'leaf-v1',
+            'macro-v2',
+            'macro-v3-stage-push',
+            'macro-v4-single-array',
+        ]
+    ),
     default='leaf-v1',
     show_default=True,
     help='Shatter execution strategy.',
@@ -348,7 +355,10 @@ def initialize_cmd(
     type=int,
     default=300,
     show_default=True,
-    help='Desired macro-v3 local consolidation-plan fragment size in MiB.',
+    help=(
+        'Desired consolidation-plan fragment size in MiB for macro-v3 local '
+        'stages or the macro-v4 canonical array.'
+    ),
 )
 @click.option(
     '--stage-worker-address',

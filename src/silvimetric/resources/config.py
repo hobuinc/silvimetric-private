@@ -270,7 +270,9 @@ class ShatterConfig(Config):
     tile_size: Union[int, None] = field(default=None)
     """The number of cells to include in a tile., defaults to None"""
     processing_strategy: str = field(default='leaf-v1')
-    """Execution strategy: ``leaf-v1``, ``macro-v2``, or staged macro-v3."""
+    """Execution strategy: ``leaf-v1``, ``macro-v2``, staged macro-v3, or
+    direct-to-one-array macro-v4.
+    """
     read_group_size: Union[int, None] = field(default=None)
     """Number of cells in a square macro read group for ``macro-v2``."""
     processing_halo_m: Union[float, None] = field(default=None)
@@ -348,17 +350,26 @@ class ShatterConfig(Config):
         if isinstance(self.read_group_size, float):
             self.read_group_size = int(self.read_group_size)
 
-        strategies = {'leaf-v1', 'macro-v2', 'macro-v3-stage-push'}
+        strategies = {
+            'leaf-v1',
+            'macro-v2',
+            'macro-v3-stage-push',
+            'macro-v4-single-array',
+        }
         if self.processing_strategy not in strategies:
             raise ValueError(
-                'processing_strategy must be leaf-v1, macro-v2, or '
-                'macro-v3-stage-push'
+                'processing_strategy must be leaf-v1, macro-v2, '
+                'macro-v3-stage-push, or macro-v4-single-array'
             )
 
         if self.processing_halo_m is not None and self.processing_halo_m < 0:
             raise ValueError('processing_halo_m must be non-negative')
 
-        if self.processing_strategy in {'macro-v2', 'macro-v3-stage-push'}:
+        if self.processing_strategy in {
+            'macro-v2',
+            'macro-v3-stage-push',
+            'macro-v4-single-array',
+        }:
             if self.tile_size is None or self.read_group_size is None:
                 raise ValueError(
                     'macro strategies require both tile_size and '
@@ -433,6 +444,10 @@ class ShatterConfig(Config):
                 raise ValueError(
                     'stage_planner_density_safety_factor must be at least 1'
                 )
+
+        if self.processing_strategy == 'macro-v4-single-array':
+            if self.stage_fragment_size_mb < 1:
+                raise ValueError('stage_fragment_size_mb must be positive')
 
     @property
     def timestamp(self):

@@ -558,6 +558,26 @@ def do_macro_to_shard(
     return result
 
 
+def do_macro_to_single_array(
+    macros: list[Extents], config: ShatterConfig, storage: Storage
+) -> 'MacroTaskResult':
+    """Process one spatial block into the canonical macro-v4 array.
+
+    A macro remains the PDAL/metric execution unit, including its read
+    collar. ``do_macro`` trims its output to the macro's core grid extent, so
+    adjacent blocks write disjoint dense-array cells. TileDB records those
+    writes as fragments of *one* array; there is no Group-level mosaic or
+    per-shard public array to discover at read time.
+
+    Task retries are intentionally disabled by the caller. A retry after an
+    uncertain TileDB commit could append a second fragment for the same cell
+    range. Idempotent staged publication is a later macro-v4 enhancement.
+    """
+    return combine_macro_results(
+        [do_macro(macro, config, storage) for macro in macros]
+    )
+
+
 def do_macro_to_partial_stage(
     macro: Extents,
     block_name: str,
@@ -1012,6 +1032,113 @@ def run_macro_to_stage(
     return config.point_count
 
 
+def run_macro_to_single_array(
+    macros: Leaves,
+    config: ShatterConfig,
+    storage: Storage,
+    data: Data,
+) -> int:
+    """Write macro-v4 blocks directly into one pre-created TileDB array.
+
+    This initial proof path has no external shard catalog in its read model:
+    spatial blocks create internal fragments of ``config.tdb_dir`` and are
+    consolidated after every worker completes. The destination must be empty
+    because macro-v4 has not yet implemented an idempotent recovery ledger.
+    """
+    driver_started = perf_counter()
+    existing_fragments = tiledb.array_fragments(config.tdb_dir)
+    if existing_fragments:
+        raise RuntimeError(
+            'macro-v4-single-array requires an empty destination array; '
+            'create a new immutable release URI for each run.'
+        )
+
+    dc = get_client()
+    failures = []
+    task_results: list[MacroTaskResult] = []
+    macro_blocks, planner = plan_macro_blocks(
+        list(macros), config, storage, data
+    )
+    if dc is not None:
+        if not dc.scheduler_info()['workers']:
+            raise RuntimeError('macro-v4 requires at least one Dask worker')
+        estimated_points = {
+            window['name']: window['estimated_max_points']
+            for window in planner.get('windows', [])
+        }
+        planned_blocks = sorted(
+            macro_blocks,
+            key=lambda block: estimated_points.get(_shard_name(block), 0),
+            reverse=True,
+        )
+        futures = [
+            dc.submit(
+                do_macro_to_single_array,
+                macros=block,
+                config=config,
+                storage=storage,
+                retries=0,
+            )
+            for block in planned_blocks
+        ]
+        planner['distributed_executor'] = {
+            'mode': 'disjoint-blocks-write-one-array',
+            'worker_address_restrictions': False,
+            'block_task_count': len(futures),
+            'retries': 0,
+        }
+        completed = as_completed(futures, with_results=True, raise_errors=False)
+        for future, result in completed:
+            if future.status == 'error':
+                failures.append((future, result))
+            else:
+                task_results.append(result)
+        if failures:
+            _raise_task_failures(failures)
+    else:
+        for block in macro_blocks:
+            task_results.append(do_macro_to_single_array(block, config, storage))
+
+    config.point_count += sum(result.point_count for result in task_results)
+    fragments_before = storage.stage_fragment_summary()
+    consolidation_started = perf_counter()
+    storage.consolidate_canonical_array(config.stage_fragment_size_mb)
+    storage.vacuum()
+    for mode in ['fragment_meta', 'commits', 'array_meta']:
+        storage.consolidate(mode)
+        storage.vacuum(mode)
+    fragments_after = storage.stage_fragment_summary()
+
+    timing = summarize_macro_timing(
+        task_results,
+        perf_counter() - driver_started,
+        strategy='macro-v4-single-array',
+    )
+    timing['planner'] = planner
+    timing['array'] = {
+        'fragment_target_mb': config.stage_fragment_size_mb,
+        'fragment_count_before': len(fragments_before),
+        'fragment_bytes_before': sum(
+            fragment['bytes'] for fragment in fragments_before
+        ),
+        'consolidation_count': max(
+            len(fragments_before) - len(fragments_after), 0
+        ),
+        'fragment_count_after': len(fragments_after),
+        'fragment_bytes_after': sum(
+            fragment['bytes'] for fragment in fragments_after
+        ),
+        'consolidation_seconds': round(
+            perf_counter() - consolidation_started, 6
+        ),
+    }
+    config.execution_timing = merge_macro_timing(
+        config.execution_timing,
+        timing,
+    )
+    return config.point_count
+
+
 def group_macro_blocks(
     macros: list[Extents], config: ShatterConfig, storage: Storage
 ) -> list[list[Extents]]:
@@ -1412,7 +1539,10 @@ def shatter(config: ShatterConfig) -> int:
     ]
     tiled_leaves = [extents.get_overlap(leaf) for leaf in filtered_leaves]
     full_count = len(tiled_leaves)
-    if config.processing_strategy == 'macro-v3-stage-push':
+    if config.processing_strategy in {
+        'macro-v3-stage-push',
+        'macro-v4-single-array',
+    }:
         # Group across every underlying TileDB tile.  Grouping each tile
         # separately would reintroduce tiny published shards at tile edges.
         macros = [
@@ -1421,7 +1551,12 @@ def shatter(config: ShatterConfig) -> int:
             for macro in extent.get_leaf_children(config.read_group_size)
         ]
         try:
-            run_macro_to_stage(iter(macros), config, storage, data)
+            if config.processing_strategy == 'macro-v3-stage-push':
+                run_macro_to_stage(iter(macros), config, storage, data)
+            else:
+                run_macro_to_single_array(
+                    iter(macros), config, storage, data
+                )
         except Exception as e:
             final(config, storage)
             raise e
@@ -1461,7 +1596,11 @@ def shatter(config: ShatterConfig) -> int:
                 config.to_json()
             )
 
-    if config.processing_strategy in {'macro-v2', 'macro-v3-stage-push'}:
+    if config.processing_strategy in {
+        'macro-v2',
+        'macro-v3-stage-push',
+        'macro-v4-single-array',
+    }:
         config.execution_timing['maintenance_seconds'] = round(
             maintenance_seconds, 6
         )

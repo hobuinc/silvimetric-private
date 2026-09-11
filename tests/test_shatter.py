@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import dask
+import tiledb
+from dask.distributed import Client, LocalCluster
 from osgeo import gdal
 
 from silvimetric import (
@@ -407,6 +409,123 @@ class Test_Shatter(object):
                 right.GetRasterBand(1).ReadAsArray(),
             )
         assert len(inline_client.submissions) == len(Storage.shard_members(v3_dir))
+
+    def test_macro_v4_writes_one_array_and_matches_macro_v2(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+        threaded_dask,
+    ):
+        """Macro-v4 stores every disjoint macro as one array's fragments."""
+        v2_dir = (tmp_path / 'macro-v2.tdb').as_posix()
+        v4_dir = (tmp_path / 'macro-v4.tdb').as_posix()
+        v2_config = copy.deepcopy(storage.config)
+        v2_config.tdb_dir = v2_dir
+        Storage.create(v2_config)
+        v4_storage_config = copy.deepcopy(storage.config)
+        v4_storage_config.tdb_dir = v4_dir
+        Storage.create(v4_storage_config)
+
+        macro_common = dict(
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+        )
+        v2 = ShatterConfig(
+            tdb_dir=v2_dir,
+            processing_strategy='macro-v2',
+            **macro_common,
+        )
+        v4 = ShatterConfig(
+            tdb_dir=v4_dir,
+            processing_strategy='macro-v4-single-array',
+            stage_fragment_size_mb=1,
+            **macro_common,
+        )
+
+        assert shatter(v2) == shatter(v4) == test_point_count
+        v4_storage = Storage.from_db(v4_dir)
+        assert tiledb.object_type(v4_dir) == 'array'
+        assert tiledb.array_fragments(v4_dir)
+        confirm_one_entry(
+            v4_storage,
+            v4_storage.config.root.maxy,
+            11 if v4_storage.config.alignment == 'AlignToCenter' else 10,
+            test_point_count,
+        )
+
+        timing = v4.execution_timing
+        assert timing['strategy'] == 'macro-v4-single-array'
+        assert timing['point_count'] == test_point_count
+        assert timing['array']['fragment_count_before'] > 1
+        assert timing['array']['fragment_count_after'] >= 1
+        assert timing['planner']['macro_count'] == timing['macro_count']
+
+        v2_output = tmp_path / 'macro-v2-extract'
+        v4_output = tmp_path / 'macro-v4-extract'
+        for database, output in ((v2_dir, v2_output), (v4_dir, v4_output)):
+            extract(
+                ExtractConfig(
+                    tdb_dir=database,
+                    out_dir=str(output),
+                    bounds=shatter_config.bounds,
+                    date=shatter_config.date,
+                )
+            )
+
+        v2_rasters = {path.name: path for path in Path(v2_output).glob('*.tif')}
+        v4_rasters = {path.name: path for path in Path(v4_output).glob('*.tif')}
+        assert v2_rasters.keys() == v4_rasters.keys()
+        for name in v2_rasters:
+            left = gdal.Open(str(v2_rasters[name]))
+            right = gdal.Open(str(v4_rasters[name]))
+            np.testing.assert_equal(
+                left.GetRasterBand(1).ReadAsArray(),
+                right.GetRasterBand(1).ReadAsArray(),
+            )
+
+    def test_macro_v4_accepts_parallel_disjoint_writers(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """Two Dask workers may commit disjoint macro ranges to one array."""
+        v4_dir = (tmp_path / 'macro-v4-parallel.tdb').as_posix()
+        v4_storage_config = copy.deepcopy(storage.config)
+        v4_storage_config.tdb_dir = v4_dir
+        Storage.create(v4_storage_config)
+        v4 = ShatterConfig(
+            tdb_dir=v4_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_strategy='macro-v4-single-array',
+            stage_fragment_size_mb=1,
+        )
+        with LocalCluster(
+            n_workers=2,
+            threads_per_worker=1,
+            processes=False,
+            dashboard_address=None,
+        ) as cluster:
+            with Client(cluster):
+                assert shatter(v4) == test_point_count
+
+        v4_storage = Storage.from_db(v4_dir)
+        assert int(v4_storage.open('r').df[:, :]['count'].sum()) == test_point_count
+        executor = v4.execution_timing['planner']['distributed_executor']
+        assert executor['mode'] == 'disjoint-blocks-write-one-array'
+        assert executor['block_task_count'] >= 2
+        assert executor['retries'] == 0
 
     def test_multiple(
         self,
