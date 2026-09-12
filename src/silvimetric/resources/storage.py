@@ -844,12 +844,13 @@ class Storage:
     ]
 
     def vacuum(self, mode: ManageType = 'fragments'):
-        c = tiledb.Config(
-            {
-                'sm.vacuum.mode': mode,
-            }
+        c = self.get_tdb_context().config()
+        c['sm.vacuum.mode'] = mode
+        tiledb.vacuum(
+            self.config.tdb_dir,
+            ctx=tiledb.Ctx(c),
+            config=c,
         )
-        tiledb.vacuum(self.config.tdb_dir, config=c)
 
     def consolidate(
         self,
@@ -867,13 +868,10 @@ class Storage:
         ts_start = timestamp[0] if timestamp is not None else 0
         ts_end_def = int(datetime.now().timestamp() * 1000)
         ts_end = timestamp[1] if timestamp is not None else ts_end_def
-        c = tiledb.Config(
-            {
-                'sm.consolidation.mode': mode,
-                'sm.consolidation.timestamp_start': ts_start,
-                'sm.consolidation.timestamp_end': ts_end,
-            }
-        )
+        c = self.get_tdb_context().config()
+        c['sm.consolidation.mode'] = mode
+        c['sm.consolidation.timestamp_start'] = ts_start
+        c['sm.consolidation.timestamp_end'] = ts_end
         try:
             tiledb.consolidate(self.config.tdb_dir, ctx=tiledb.Ctx(c), config=c)
         except Exception as e:

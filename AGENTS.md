@@ -91,6 +91,14 @@
 - Regression coverage in `tests/test_shatter.py` verifies macro-v2-equivalent
   extraction and two concurrent Dask writers against one array. The next
   milestone is a bounded S3 run, then safe stage-and-push/idempotent recovery.
+- The bounded S3 proof completed on 2026-09-12 at
+  `s3://sm-smoke-056176271256-3b780f15-996a-4e00-a7f1-a7fadcb7bf17/macro-v4-proof/c88ca1fc-bea2-447b-a68f-cbaa4a0898c2/metrics.tdb`:
+  two local Dask workers wrote 108,900 points in 121 populated cells; TileDB
+  reports one active consolidated fragment after vacuum. The smoke bucket
+  expires its contents after seven days.
+- `Storage.vacuum()` and the generic `Storage.consolidate()` must retain the
+  `Storage.get_tdb_context()` settings. A fresh TileDB context loses the
+  S3-region/profile configuration and leaves superseded S3 objects behind.
 
 ## Validation used for this state
 

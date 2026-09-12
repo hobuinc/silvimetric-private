@@ -64,3 +64,33 @@ def test_stage_consolidation_replans_after_each_merge(monkeypatch):
         ('/tmp/stage.tdb', ['a', 'b']),
         ('/tmp/stage.tdb', ['ab', 'c']),
     ]
+
+
+def test_maintenance_operations_preserve_s3_context(monkeypatch):
+    """Vacuum/consolidation must retain the configured S3 region and profile."""
+    storage = Storage.__new__(Storage)
+    storage.config = SimpleNamespace(tdb_dir='s3://example/array')
+    monkeypatch.setenv('SILVIMETRIC_TILEDB_S3_REGION', 'us-west-2')
+    calls = []
+
+    monkeypatch.setattr(
+        tiledb,
+        'vacuum',
+        lambda uri, ctx, config: calls.append(('vacuum', uri, config)),
+    )
+    monkeypatch.setattr(
+        tiledb,
+        'consolidate',
+        lambda uri, ctx, config: calls.append(('consolidate', uri, config)),
+    )
+
+    storage.vacuum('commits')
+    storage.consolidate('array_meta')
+
+    assert [(operation, uri) for operation, uri, _ in calls] == [
+        ('vacuum', 's3://example/array'),
+        ('consolidate', 's3://example/array'),
+    ]
+    assert all(config['vfs.s3.region'] == 'us-west-2' for _, _, config in calls)
+    assert calls[0][2]['sm.vacuum.mode'] == 'commits'
+    assert calls[1][2]['sm.consolidation.mode'] == 'array_meta'
