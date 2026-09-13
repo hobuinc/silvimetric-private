@@ -1,0 +1,232 @@
+"""Durable, append-only records for resumable canonical-array builds.
+
+The ledger deliberately avoids a shared mutable document.  Every transition is
+an immutable JSON object beneath the build's ledger URI, so a worker dying
+between a TileDB write and an acknowledgement cannot corrupt the coordination
+state.  A later driver derives the state of each deterministic block from its
+records and either resumes publication or creates a fresh stage attempt.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Any
+
+import tiledb
+
+
+_STATE_ORDER = {
+    'planned': 0,
+    'computing': 1,
+    'staged': 2,
+    # Publishing is an observation, not a durable completion.  A restart must
+    # resume from the preceding staged receipt unless a published receipt was
+    # successfully persisted.
+    'publishing': 1,
+    'published': 4,
+    'validated': 5,
+}
+
+
+def _join_uri(base: str, *parts: str) -> str:
+    """Join local or object-store URIs without losing an ``s3://`` scheme."""
+    if '://' in base:
+        scheme, remainder = base.split('://', 1)
+        return f'{scheme}://{PurePosixPath(remainder, *parts)}'
+    return str(PurePosixPath(base, *parts))
+
+
+@dataclass(frozen=True)
+class BuildRecord:
+    """One immutable build-state transition."""
+
+    block_id: str
+    state: str
+    attempt_id: str
+    created_at_ns: int
+    details: dict[str, Any]
+    uri: str | None = None
+
+    @classmethod
+    def from_json(cls, value: dict[str, Any], uri: str) -> 'BuildRecord':
+        return cls(
+            block_id=value['block_id'],
+            state=value['state'],
+            attempt_id=value['attempt_id'],
+            created_at_ns=int(value['created_at_ns']),
+            details=value.get('details', {}),
+            uri=uri,
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            'block_id': self.block_id,
+            'state': self.state,
+            'attempt_id': self.attempt_id,
+            'created_at_ns': self.created_at_ns,
+            'details': self.details,
+        }
+
+
+class BuildLedger:
+    """Append-only durable build records backed by TileDB VFS.
+
+    ``uri`` may be a shared POSIX directory for local testing or an S3 prefix
+    for production.  VFS is given the caller's TileDB context configuration so
+    the ledger follows the same profile/region/no-sign policy as its array.
+    """
+
+    def __init__(self, uri: str, ctx: tiledb.Ctx | None = None):
+        self.uri = uri.rstrip('/')
+        self._context_config = dict(ctx.config()) if ctx is not None else None
+
+    def _vfs(self) -> tiledb.VFS:
+        if self._context_config is None:
+            return tiledb.VFS()
+        return tiledb.VFS(ctx=tiledb.Ctx(tiledb.Config(self._context_config)))
+
+    def block_uri(self, block_id: str) -> str:
+        return _join_uri(self.uri, 'blocks', block_id)
+
+    def _record_uri(self, record: BuildRecord) -> str:
+        # The attempt and monotonic-ish timestamp make every record immutable,
+        # including repeated observations of a stable state after recovery.
+        name = (
+            f'{record.created_at_ns:020d}-{record.state}-'
+            f'{record.attempt_id}.json'
+        )
+        return _join_uri(self.block_uri(record.block_id), name)
+
+    def append(
+        self,
+        block_id: str,
+        state: str,
+        *,
+        attempt_id: str | None = None,
+        **details: Any,
+    ) -> BuildRecord:
+        """Persist an immutable state transition and return its receipt."""
+        if state not in _STATE_ORDER and state not in {
+            'build_started',
+            'build_consolidating',
+            'build_sealed',
+            'build_partial',
+        }:
+            raise ValueError(f'Unknown build ledger state {state!r}')
+        record = BuildRecord(
+            block_id=block_id,
+            state=state,
+            attempt_id=attempt_id or uuid.uuid4().hex,
+            created_at_ns=time.time_ns(),
+            details=details,
+        )
+        uri = self._record_uri(record)
+        vfs = self._vfs()
+        vfs.create_dir(self.block_uri(block_id))
+        with vfs.open(uri, 'wb') as stream:
+            stream.write(json.dumps(record.to_json(), sort_keys=True).encode())
+        return BuildRecord(**{**record.__dict__, 'uri': uri})
+
+    def records(self, block_id: str) -> list[BuildRecord]:
+        """Read all immutable records for one planned block."""
+        vfs = self._vfs()
+        block_uri = self.block_uri(block_id)
+        if not vfs.is_dir(block_uri):
+            return []
+        records = []
+        for uri in vfs.ls(block_uri):
+            if not uri.endswith('.json'):
+                continue
+            with vfs.open(uri, 'rb') as stream:
+                records.append(
+                    BuildRecord.from_json(json.loads(stream.read()), uri)
+                )
+        return sorted(records, key=lambda record: record.created_at_ns)
+
+    def state(self, block_id: str) -> BuildRecord | None:
+        """Return the highest durable state, preferring the latest receipt."""
+        records = self.records(block_id)
+        if not records:
+            return None
+        return max(
+            records,
+            key=lambda record: (
+                _STATE_ORDER.get(record.state, -1),
+                record.created_at_ns,
+            ),
+        )
+
+    def summary(self, block_ids: list[str]) -> dict[str, Any]:
+        """Return an auditable view without scanning unknown ledger keys."""
+        states: dict[str, int] = {}
+        records: dict[str, BuildRecord | None] = {}
+        for block_id in block_ids:
+            record = self.state(block_id)
+            records[block_id] = record
+            state = record.state if record is not None else 'missing'
+            states[state] = states.get(state, 0) + 1
+        return {
+            'ledger_uri': self.uri,
+            'block_count': len(block_ids),
+            'states': states,
+            'records': records,
+        }
+
+    def assert_build_identity(
+        self,
+        *,
+        build_id: str,
+        canonical_uri: str,
+        build_signature: str,
+        build_inputs: dict[str, Any] | None = None,
+    ) -> bool:
+        """Bind a ledger prefix to one intended canonical-array build.
+
+        A ledger URI is a build-scoped resource, not a reusable coordination
+        directory. This check prevents an operator from accidentally resuming
+        a partially completed build with a different source, date, spatial
+        plan, or destination. It returns ``True`` when this is a resume and
+        ``False`` when the caller must write the initial manifest.
+
+        The driver remains the single coordinator for a ledger. Append-only
+        VFS objects intentionally do not try to provide a distributed lease;
+        two independent drivers must not use the same ledger concurrently.
+        """
+        original = self.build_manifest()
+        if original is None:
+            return False
+
+        original = original.details
+        expected = {
+            'build_id': build_id,
+            'canonical_uri': canonical_uri.rstrip('/'),
+            'build_signature': build_signature,
+        }
+        actual = {
+            key: str(original.get(key, '')).rstrip('/')
+            if key == 'canonical_uri'
+            else str(original.get(key, ''))
+            for key in expected
+        }
+        if actual != expected:
+            raise ValueError(
+                'The requested build does not match the existing ledger '
+                f'manifest at {self.uri!r}. Use a new ledger URI for a new '
+                f'build; existing={actual!r}, requested={expected!r}; '
+                f'existing_inputs={original.get("build_inputs")!r}, '
+                f'requested_inputs={build_inputs!r}.'
+            )
+        return True
+
+    def build_manifest(self) -> BuildRecord | None:
+        """Return the first immutable ``build_started`` manifest, if any."""
+        manifests = [
+            record
+            for record in self.records('__build__')
+            if record.state == 'build_started'
+        ]
+        return manifests[0] if manifests else None

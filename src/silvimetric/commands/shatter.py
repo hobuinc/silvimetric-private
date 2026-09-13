@@ -1,6 +1,7 @@
 import numpy as np
 import signal
 import json
+import hashlib
 import math
 import os
 import resource
@@ -23,6 +24,7 @@ from dask import compute
 from dask.distributed import as_completed
 
 from .. import Bounds, Extents, Storage, Data, ShatterConfig, Metric
+from ..resources.build_ledger import BuildLedger
 from ..resources.taskgraph import Graph
 
 
@@ -114,6 +116,35 @@ def final(
     config.mbr = storage.mbrs(config=config)
     config.finished = finished
     storage.save_shatter_meta(config)
+
+
+def _record_staged_build_interruption(
+    config: ShatterConfig, storage: Storage, error: BaseException
+) -> None:
+    """Leave a durable partial-build marker before propagating an interrupt."""
+    if (
+        config.processing_strategy != 'macro-v4-staged-publish'
+        or not config.build_ledger_uri
+    ):
+        return
+    try:
+        ledger = BuildLedger(
+            config.build_ledger_uri, Storage.get_tdb_context(storage)
+        )
+        latest = ledger.state('__build__')
+        if latest is None or latest.state != 'build_partial':
+            ledger.append(
+                '__build__',
+                'build_partial',
+                build_id=str(config.name),
+                reason=type(error).__name__,
+                message=str(error),
+            )
+    except Exception:
+        # Preserve the original exception (especially KeyboardInterrupt) if
+        # an object-store outage prevents writing a final observation. The
+        # durable per-block receipts remain sufficient for a later resume.
+        config.log.exception('Unable to append macro-v4 partial-build receipt')
 
 
 def get_data(
@@ -578,6 +609,295 @@ def do_macro_to_single_array(
     )
 
 
+def _durable_stage_uri(
+    config: ShatterConfig, block_id: str, attempt_id: str
+) -> str:
+    """Spread immutable stage attempts across object-store key prefixes."""
+    digest = hashlib.sha256(block_id.encode()).hexdigest()
+    return (
+        f'{config.build_stage_uri.rstrip("/")}/'
+        f'{digest[:2]}/{digest[2:4]}/{block_id}/{attempt_id}.tdb'
+    )
+
+
+def _result_details(result: 'MacroTaskResult') -> dict:
+    """Convert a compact task result into JSON-safe durable receipt details."""
+    return {
+        'point_count': int(result.point_count),
+        'cell_count': int(result.cell_count),
+        'macro_count': int(result.macro_count),
+        'read_seconds': float(result.read_seconds),
+        'aggregate_seconds': float(result.aggregate_seconds),
+        'metric_seconds': float(result.metric_seconds),
+        'join_seconds': float(result.join_seconds),
+        'write_seconds': float(result.write_seconds),
+        'total_seconds': float(result.total_seconds),
+        'macro_diagnostics': result.macro_diagnostics,
+    }
+
+
+def _result_from_details(
+    details: dict, *, stage_uri: str | None = None
+) -> 'MacroTaskResult':
+    """Recreate a scheduler-sized result from a ledger receipt."""
+    return MacroTaskResult(
+        point_count=int(details.get('point_count', 0)),
+        cell_count=int(details.get('cell_count', 0)),
+        read_seconds=float(details.get('read_seconds', 0.0)),
+        aggregate_seconds=float(details.get('aggregate_seconds', 0.0)),
+        metric_seconds=float(details.get('metric_seconds', 0.0)),
+        join_seconds=float(details.get('join_seconds', 0.0)),
+        write_seconds=float(details.get('write_seconds', 0.0)),
+        total_seconds=float(details.get('total_seconds', 0.0)),
+        stage_uri=stage_uri,
+        macro_count=int(details.get('macro_count', 1)),
+        macro_diagnostics=details.get('macro_diagnostics', []),
+    )
+
+
+def _data_signature(data: pd.DataFrame) -> dict:
+    """Return a bounded integrity signature for populated canonical cells.
+
+    TileDB commits a write atomically, but a process can die after a successful
+    commit and before its durable receipt is written.  The signature lets a
+    resume run distinguish that case from a failed/incomplete write without
+    rescanning the source point cloud.  Count and coordinates are sufficient
+    to establish the exact populated grid footprint; the schema hash in the
+    receipt binds the metric definition used to produce those cells.
+    """
+    populated = data[data['count'] > 0][['X', 'Y', 'count']].sort_values(
+        ['X', 'Y'], ignore_index=True
+    )
+    hashes = pd.util.hash_pandas_object(populated, index=False).to_numpy(
+        dtype='uint64', copy=False
+    )
+    return {
+        'cell_count': int(len(populated)),
+        'point_count': int(populated['count'].sum()),
+        'xy_count_sha256': hashlib.sha256(hashes.tobytes()).hexdigest(),
+    }
+
+
+def _read_populated_stage(
+    stage_uri: str, vfs_parallel_ops: int | None = None
+) -> tuple[Storage, pd.DataFrame]:
+    """Open a durable stage and return only its populated cells."""
+    stage = Storage.from_db(stage_uri)
+    if vfs_parallel_ops is not None:
+        stage.set_context_overrides(
+            **{'vfs.s3.max_parallel_ops': vfs_parallel_ops}
+        )
+    with stage.open('r') as reader:
+        data = reader.df[:, :]
+    return stage, data[data['count'] > 0].copy()
+
+
+def _canonical_signature(
+    storage: Storage, staged_data: pd.DataFrame
+) -> dict:
+    """Read only canonical count cells required to reconcile one stage.
+
+    TileDB commits a dense-array fragment atomically across all attributes.
+    The count footprint is consequently enough to distinguish a completed
+    commit from no commit, while fetching only a scalar avoids rereading the
+    raw variable-length point attributes and every derived metric for each
+    publish acknowledgement.
+    """
+    if staged_data.empty:
+        return _data_signature(staged_data)
+    minx, maxx = int(staged_data.X.min()), int(staged_data.X.max())
+    miny, maxy = int(staged_data.Y.min()), int(staged_data.Y.max())
+    with storage.open('r') as reader:
+        candidate = reader.query(attrs=['count'], coords=True).df[
+            minx:maxx, miny:maxy
+        ]
+    return _data_signature(candidate)
+
+
+def _block_schema_hash(storage: Storage) -> str:
+    """Tie stages to the stable, output-affecting storage definition.
+
+    ``next_time_slot`` is intentionally excluded: reserving a slot is normal
+    build bookkeeping and must not turn an otherwise identical resume into a
+    different schema. Logging is similarly not part of the array contract.
+    """
+    schema = storage.config.to_json()
+    schema.pop('next_time_slot', None)
+    schema.pop('log', None)
+    return hashlib.sha256(
+        json.dumps(schema, sort_keys=True, default=str).encode()
+    ).hexdigest()
+
+
+def _build_inputs(
+    config: ShatterConfig, storage: Storage, block_ids: list[str]
+) -> dict:
+    """Identify the reproducible inputs of one resumable macro-v4 build."""
+    return {
+        'canonical_uri': config.tdb_dir.rstrip('/'),
+        'schema_sha256': _block_schema_hash(storage),
+        'source': config.filename,
+        'date': [value.isoformat() for value in config.date],
+        'bounds': config.bounds.get() if config.bounds is not None else None,
+        'tile_size': config.tile_size,
+        'read_group_size': config.read_group_size,
+        'processing_halo_m': config.processing_halo_m,
+        'block_ids': block_ids,
+    }
+
+
+def _build_signature(
+    config: ShatterConfig, storage: Storage, block_ids: list[str]
+) -> str:
+    """Return an auditable stable hash of a macro-v4 build's inputs."""
+    payload = _build_inputs(config, storage, block_ids)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode()
+    ).hexdigest()
+
+
+def stage_macro_block(
+    macros: list[Extents],
+    config: ShatterConfig,
+    storage: Storage,
+    ledger_uri: str,
+) -> 'MacroTaskResult':
+    """Compute one deterministic macro block into a durable, immutable stage.
+
+    This is safe to retry: every attempt uses a fresh stage URI, and only a
+    fully written stage receives a ``staged`` ledger receipt.  Unacknowledged
+    attempt directories are disposable and cannot be published by recovery.
+    """
+    block_id = _shard_name(macros)
+    ledger = BuildLedger(ledger_uri, Storage.get_tdb_context(storage))
+    current = ledger.state(block_id)
+    if current is not None and current.state == 'published':
+        result = _result_from_details(current.details)
+        result.block_id = block_id
+        return result
+    if current is not None and current.state == 'staged':
+        result = _result_from_details(
+            current.details, stage_uri=current.details.get('stage_uri')
+        )
+        result.block_id = block_id
+        return result
+
+    attempt_id = uuid.uuid4().hex
+    ledger.append(
+        block_id,
+        'computing',
+        attempt_id=attempt_id,
+        macro_count=len(macros),
+        bounds=_block_bounds(macros).get(),
+    )
+    stage_uri = _durable_stage_uri(config, block_id, attempt_id)
+    stage = Storage.create_stage(storage, stage_uri)
+    stage.set_context_overrides(
+        **{'vfs.s3.max_parallel_ops': config.build_stage_vfs_parallel_ops}
+    )
+    stage_config = copy.deepcopy(config)
+    stage_config.tdb_dir = stage_uri
+    stage.save_shatter_meta(stage_config)
+    result = combine_macro_results(
+        [do_macro(macro, stage_config, stage) for macro in macros]
+    )
+    stage_config.point_count = result.point_count
+    stage_config.finished = True
+    stage_config.end_timestamp = int(datetime.now().timestamp() * 1000)
+    stage.save_shatter_meta(stage_config)
+    stage.set_stage_state('durably_staged', block_id=block_id)
+
+    _, staged_data = _read_populated_stage(
+        stage_uri, config.build_stage_vfs_parallel_ops
+    )
+    signature = _data_signature(staged_data)
+    if signature['point_count'] != result.point_count:
+        raise RuntimeError(
+            f'Durable stage {stage_uri!r} point count does not match its '
+            'macro result.'
+        )
+    result.stage_uri = stage_uri
+    result.block_id = block_id
+    receipt = {
+        **_result_details(result),
+        'stage_uri': stage_uri,
+        'signature': signature,
+        'schema_sha256': _block_schema_hash(storage),
+        'bounds': _block_bounds(macros).get(),
+    }
+    ledger.append(block_id, 'staged', attempt_id=attempt_id, **receipt)
+    return result
+
+
+def publish_staged_macro_block(
+    block_id: str,
+    config: ShatterConfig,
+    ledger_uri: str,
+) -> 'MacroTaskResult':
+    """Publish one staged block through a bounded canonical-array writer.
+
+    A ``published`` receipt is emitted only after a range-limited canonical
+    read matches the stage signature.  If the process died after a successful
+    write but before that receipt, a later run detects the matching range and
+    records a reconciled publish rather than writing it again.
+    """
+    canonical = Storage.from_db(config.tdb_dir)
+    canonical.set_context_overrides(
+        **{'vfs.s3.max_parallel_ops': config.build_publish_vfs_parallel_ops}
+    )
+    ledger = BuildLedger(ledger_uri, Storage.get_tdb_context(canonical))
+    current = ledger.state(block_id)
+    if current is None or current.state not in {'staged', 'published'}:
+        raise RuntimeError(f'No staged receipt exists for block {block_id!r}')
+    if current.state == 'published':
+        result = _result_from_details(current.details)
+        result.block_id = block_id
+        return result
+
+    details = current.details
+    stage_uri = details['stage_uri']
+    result = _result_from_details(details, stage_uri=stage_uri)
+    if details['schema_sha256'] != _block_schema_hash(canonical):
+        raise RuntimeError(
+            f'Staged block {block_id!r} was built with a different schema.'
+        )
+    _stage, staged_data = _read_populated_stage(
+        stage_uri, config.build_publish_vfs_parallel_ops
+    )
+    actual_signature = _data_signature(staged_data)
+    if actual_signature != details['signature']:
+        raise RuntimeError(
+            f'Staged block {block_id!r} no longer matches its ledger receipt.'
+        )
+    started = perf_counter()
+    ledger.append(block_id, 'publishing', stage_uri=stage_uri)
+    reconciled = _canonical_signature(canonical, staged_data) == actual_signature
+    if not reconciled and not staged_data.empty:
+        canonical.write(
+            staged_data.drop(columns=['start_time', 'end_time']).rename(
+                columns={'X': 'xi', 'Y': 'yi'}
+            ),
+            config.date,
+        )
+    if _canonical_signature(canonical, staged_data) != actual_signature:
+        raise RuntimeError(
+            f'Canonical write for block {block_id!r} could not be reconciled.'
+        )
+    result.stage_publish_seconds = perf_counter() - started
+    result.block_id = block_id
+    ledger.append(
+        block_id,
+        'published',
+        stage_uri=stage_uri,
+        reconciled=reconciled,
+        **_result_details(result),
+        signature=actual_signature,
+        schema_sha256=details['schema_sha256'],
+        bounds=details['bounds'],
+    )
+    return result
+
+
 def do_macro_to_partial_stage(
     macro: Extents,
     block_name: str,
@@ -738,6 +1058,7 @@ class MacroTaskResult:
     total_seconds: float
     shard_uri: str | None = None
     stage_uri: str | None = None
+    block_id: str | None = None
     macro_count: int = 1
     stage_consolidation_count: int = 0
     stage_local_fragment_count: int = 0
@@ -1139,6 +1460,301 @@ def run_macro_to_single_array(
     return config.point_count
 
 
+def run_macro_staged_publish(
+    macros: Leaves,
+    config: ShatterConfig,
+    storage: Storage,
+    data: Data,
+) -> int:
+    """Build one canonical array through durable stages and bounded writers.
+
+    Compute tasks can scale horizontally because they write immutable stages at
+    independent object-store prefixes.  The only operations against the shared
+    canonical TileDB array run through a small publisher pool.  The ledger is
+    the source of truth for resume; it is intentionally independent of Dask's
+    transient task graph and of TileDB's physical fragment inventory.
+    """
+    driver_started = perf_counter()
+    macro_blocks, planner = plan_macro_blocks(
+        list(macros), config, storage, data
+    )
+    blocks_by_id = {_shard_name(block): block for block in macro_blocks}
+    if len(blocks_by_id) != len(macro_blocks):
+        raise RuntimeError('Macro-v4 planner produced non-unique block IDs.')
+    block_ids = sorted(blocks_by_id)
+    ledger = BuildLedger(config.build_ledger_uri, Storage.get_tdb_context(storage))
+    build_signature = _build_signature(config, storage, block_ids)
+    build_inputs = _build_inputs(config, storage, block_ids)
+    original_manifest = ledger.build_manifest()
+    resumed_build = ledger.assert_build_identity(
+        build_id=str(config.name),
+        canonical_uri=config.tdb_dir,
+        build_signature=build_signature,
+        build_inputs=build_inputs,
+    )
+    if not resumed_build:
+        ledger.append(
+            '__build__',
+            'build_started',
+            build_id=str(config.name),
+            canonical_uri=config.tdb_dir,
+            planned_block_count=len(block_ids),
+            schema_sha256=_block_schema_hash(storage),
+            build_signature=build_signature,
+            build_inputs=build_inputs,
+            time_slot=config.time_slot,
+        )
+    else:
+        original_time_slot = original_manifest.details.get('time_slot')
+        if original_time_slot is None:
+            raise ValueError(
+                'The existing build ledger predates time-slot recovery and '
+                'cannot safely resume this canonical-array build.'
+            )
+        config.time_slot = int(original_time_slot)
+    # Final canonical writes and consolidation share a conservative VFS
+    # budget. The independent stage writers use their own budget above.
+    storage.set_context_overrides(
+        **{'vfs.s3.max_parallel_ops': config.build_publish_vfs_parallel_ops}
+    )
+    # The original time slot is now bound (including on a resumed driver), so
+    # worker-stage metadata and canonical history describe one logical build.
+    storage.save_shatter_meta(config)
+
+    staged_results: list[MacroTaskResult] = []
+    published_results: list[MacroTaskResult] = []
+    stage_candidates: list[list[Extents]] = []
+    for block_id in block_ids:
+        record = ledger.state(block_id)
+        if record is None:
+            ledger.append(
+                block_id,
+                'planned',
+                bounds=_block_bounds(blocks_by_id[block_id]).get(),
+                macro_count=len(blocks_by_id[block_id]),
+            )
+            stage_candidates.append(blocks_by_id[block_id])
+        elif record.state == 'published':
+            published_results.append(_result_from_details(record.details))
+        elif record.state == 'staged':
+            resumed = _result_from_details(
+                record.details, stage_uri=record.details.get('stage_uri')
+            )
+            resumed.block_id = block_id
+            staged_results.append(resumed)
+        else:
+            stage_candidates.append(blocks_by_id[block_id])
+
+    failures = []
+
+    def publish_one(block_id: str, active, stream) -> None:
+        while len(active) >= config.build_publish_concurrency:
+            future, result = next(stream)
+            active.discard(future)
+            if future.status == 'error':
+                failures.append((future, result))
+            else:
+                published_results.append(result)
+        future = dc.submit(
+            publish_staged_macro_block,
+            block_id=block_id,
+            config=config,
+            ledger_uri=config.build_ledger_uri,
+            retries=0,
+        )
+        active.add(future)
+        stream.add(future)
+
+    dc = get_client()
+    if dc is not None:
+        if not dc.scheduler_info()['workers']:
+            raise RuntimeError(
+                'macro-v4-staged-publish requires at least one Dask worker'
+            )
+        stage_futures = [
+            dc.submit(
+                stage_macro_block,
+                macros=block,
+                config=config,
+                storage=storage,
+                ledger_uri=config.build_ledger_uri,
+                retries=config.build_stage_retries,
+            )
+            for block in stage_candidates
+        ]
+        stage_stream = as_completed(
+            stage_futures, with_results=True, raise_errors=False
+        )
+        publish_stream = as_completed([], with_results=True, raise_errors=False)
+        active_publishes = set()
+        for result in staged_results:
+            publish_one(result.block_id, active_publishes, publish_stream)
+        for future, result in stage_stream:
+            if future.status == 'error':
+                failures.append((future, result))
+                continue
+            staged_results.append(result)
+            publish_one(result.block_id, active_publishes, publish_stream)
+        while active_publishes:
+            future, result = next(publish_stream)
+            active_publishes.discard(future)
+            if future.status == 'error':
+                failures.append((future, result))
+            else:
+                published_results.append(result)
+        planner['distributed_executor'] = {
+            'mode': 'durable-stages-bounded-canonical-publishers',
+            'stage_task_count': len(stage_futures),
+            'resume_staged_block_count': len(staged_results) - len(stage_futures),
+            'publisher_concurrency': config.build_publish_concurrency,
+            'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
+            'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,
+            'stage_retries': config.build_stage_retries,
+            'publish_retries': 0,
+        }
+    else:
+        for block in stage_candidates:
+            try:
+                staged_results.append(
+                    stage_macro_block(
+                        block, config, storage, config.build_ledger_uri
+                    )
+                )
+            except Exception as error:
+                failures.append((None, error))
+        for result in staged_results:
+            try:
+                published_results.append(
+                    publish_staged_macro_block(
+                        result.block_id, config, config.build_ledger_uri
+                    )
+                )
+            except Exception as error:
+                failures.append((None, error))
+        planner['distributed_executor'] = {
+            'mode': 'local-durable-stages-bounded-canonical-publishers',
+            'stage_task_count': len(stage_candidates),
+            'resume_staged_block_count': len(staged_results)
+            - len(stage_candidates),
+            'publisher_concurrency': 1,
+            'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
+            'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,
+            'stage_retries': 0,
+            'publish_retries': 0,
+        }
+
+    # Each block has at most one stable published receipt.  Compute the total
+    # from ledger state so a resumed driver cannot double-count prior work.
+    summary = ledger.summary(block_ids)
+    published_records = [
+        record
+        for record in summary['records'].values()
+        if record is not None and record.state == 'published'
+    ]
+    config.point_count = sum(
+        int(record.details.get('point_count', 0))
+        for record in published_records
+    )
+    timing = summarize_macro_timing(
+        published_results,
+        perf_counter() - driver_started,
+        strategy='macro-v4-staged-publish',
+    )
+    timing['planner'] = planner
+    timing['build_ledger'] = {
+        'uri': config.build_ledger_uri,
+        'build_id': str(config.name),
+        'build_signature': build_signature,
+        'states': summary['states'],
+        'published_block_count': len(published_records),
+        'planned_block_count': len(block_ids),
+        'partial': bool(failures) or len(published_records) != len(block_ids),
+    }
+    config.execution_timing = timing
+
+    if failures or len(published_records) != len(block_ids):
+        ledger.append(
+            '__build__',
+            'build_partial',
+            build_id=str(config.name),
+            published_block_count=len(published_records),
+            planned_block_count=len(block_ids),
+            failed_task_count=len(failures),
+        )
+        if failures:
+            _raise_task_failures(failures)
+        raise RuntimeError(
+            'Macro-v4 staged build is incomplete; resume with the same '
+            'build name and ledger URI.'
+        )
+
+    prior_build_state = ledger.state('__build__')
+    if (
+        prior_build_state is not None
+        and prior_build_state.state == 'build_sealed'
+    ):
+        # A completed build may be inspected/restarted without replaying an
+        # expensive whole-array consolidation. Interrupted finalization never
+        # has this receipt and therefore naturally re-enters the maintenance
+        # path below.
+        timing['array'] = {
+            'fragment_target_mb': config.stage_fragment_size_mb,
+            'fragment_count_after': prior_build_state.details.get(
+                'fragment_count'
+            ),
+            'fragment_bytes_after': prior_build_state.details.get(
+                'fragment_bytes'
+            ),
+            'consolidation_skipped': True,
+        }
+        config.execution_timing = timing
+        return config.point_count
+
+    fragments_before = storage.stage_fragment_summary()
+    ledger.append(
+        '__build__',
+        'build_consolidating',
+        build_id=str(config.name),
+        fragment_count=len(fragments_before),
+    )
+    consolidation_started = perf_counter()
+    storage.consolidate_canonical_array(config.stage_fragment_size_mb)
+    storage.vacuum()
+    for mode in ['fragment_meta', 'commits', 'array_meta']:
+        storage.consolidate(mode)
+        storage.vacuum(mode)
+    fragments_after = storage.stage_fragment_summary()
+    seal = {
+        'build_id': str(config.name),
+        'build_state': 'sealed',
+        'planned_block_count': len(block_ids),
+        'published_block_count': len(published_records),
+        'point_count': config.point_count,
+        'fragment_count': len(fragments_after),
+        'fragment_bytes': sum(fragment['bytes'] for fragment in fragments_after),
+    }
+    ledger.append('__build__', 'build_sealed', **seal)
+    storage.save_metadata(
+        f'macro_v4_build_{config.name}', json.dumps(seal, sort_keys=True)
+    )
+    timing['array'] = {
+        'fragment_target_mb': config.stage_fragment_size_mb,
+        'fragment_count_before': len(fragments_before),
+        'fragment_count_after': len(fragments_after),
+        'fragment_bytes_before': sum(
+            fragment['bytes'] for fragment in fragments_before
+        ),
+        'fragment_bytes_after': sum(
+            fragment['bytes'] for fragment in fragments_after
+        ),
+        'consolidation_seconds': round(
+            perf_counter() - consolidation_started, 6
+        ),
+    }
+    config.execution_timing = timing
+    return config.point_count
+
+
 def group_macro_blocks(
     macros: list[Extents], config: ShatterConfig, storage: Storage
 ) -> list[list[Extents]]:
@@ -1503,11 +2119,24 @@ def shatter(config: ShatterConfig) -> int:
     storage = Storage.from_db(config.tdb_dir)
     data = Data(config.filename, storage.config, config.bounds)
     extents = Extents.from_sub(config.tdb_dir, data.bounds)
+    # Persist the normalized planning bounds on this run's configuration.
+    # ``Data`` owns a defensive copy, so this is now stable across a resume.
+    config.bounds = data.bounds
 
-    # try to catch sigints and save info about work that has been done so far
-    signal.signal(
-        signal.SIGINT, lambda signum, frame, c=config, s=storage: final(c, s)
-    )
+    # Let the normal exception path record a durable partial ledger state and
+    # metadata before stopping. The prior handler only saved metadata and
+    # then swallowed SIGINT, which made a requested interruption continue.
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt(f'Shatter interrupted by signal {signum}')
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, interrupt)
+    signal.signal(signal.SIGTERM, interrupt)
+
+    def restore_signal_handlers():
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
     config.log.debug(f'Shatter Config: {config}')
     config.log.debug(f'Data: {data}')
@@ -1516,11 +2145,9 @@ def shatter(config: ShatterConfig) -> int:
     if not config.time_slot:  # defaults to 0, which is reserved for storage cfg
         config.time_slot = storage.reserve_time_slot()
 
-    if config.bounds is None:
-        config.bounds = extents.bounds
     if config.processing_strategy == 'macro-v3-stage-push':
         Storage.create_shard_group(storage.config, config.stage_publish_uri)
-    else:
+    elif config.processing_strategy != 'macro-v4-staged-publish':
         storage.save_shatter_meta(config)
 
     leaf_size = storage.config.ysize * storage.config.xsize
@@ -1542,6 +2169,7 @@ def shatter(config: ShatterConfig) -> int:
     if config.processing_strategy in {
         'macro-v3-stage-push',
         'macro-v4-single-array',
+        'macro-v4-staged-publish',
     }:
         # Group across every underlying TileDB tile.  Grouping each tile
         # separately would reintroduce tiny published shards at tile edges.
@@ -1553,13 +2181,19 @@ def shatter(config: ShatterConfig) -> int:
         try:
             if config.processing_strategy == 'macro-v3-stage-push':
                 run_macro_to_stage(iter(macros), config, storage, data)
+            elif config.processing_strategy == 'macro-v4-staged-publish':
+                run_macro_staged_publish(
+                    iter(macros), config, storage, data
+                )
             else:
                 run_macro_to_single_array(
                     iter(macros), config, storage, data
                 )
-        except Exception as e:
+        except BaseException as e:
+            restore_signal_handlers()
+            _record_staged_build_interruption(config, storage, e)
             final(config, storage)
-            raise e
+            raise
     else:
         count = 0
         for e in tiled_leaves:
@@ -1583,9 +2217,10 @@ def shatter(config: ShatterConfig) -> int:
                     storage.consolidate(mode)
                     storage.vacuum(mode)
                 maintenance_seconds += perf_counter() - maintenance_started
-            except Exception as e:
+            except BaseException as e:
+                restore_signal_handlers()
                 final(config, storage)
-                raise e
+                raise
 
     if config.processing_strategy == 'macro-v3-stage-push':
         config.tdb_dir = config.stage_publish_uri
@@ -1600,6 +2235,7 @@ def shatter(config: ShatterConfig) -> int:
         'macro-v2',
         'macro-v3-stage-push',
         'macro-v4-single-array',
+        'macro-v4-staged-publish',
     }:
         config.execution_timing['maintenance_seconds'] = round(
             maintenance_seconds, 6
@@ -1610,4 +2246,5 @@ def shatter(config: ShatterConfig) -> int:
 
     if config.processing_strategy != 'macro-v3-stage-push':
         final(config, storage, finished=True)
+    restore_signal_handlers()
     return config.point_count

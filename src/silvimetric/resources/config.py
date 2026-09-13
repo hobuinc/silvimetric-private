@@ -271,7 +271,7 @@ class ShatterConfig(Config):
     """The number of cells to include in a tile., defaults to None"""
     processing_strategy: str = field(default='leaf-v1')
     """Execution strategy: ``leaf-v1``, ``macro-v2``, staged macro-v3, or
-    direct-to-one-array macro-v4.
+    direct-to-one-array macro-v4, or resumable staged macro-v4.
     """
     read_group_size: Union[int, None] = field(default=None)
     """Number of cells in a square macro read group for ``macro-v2``."""
@@ -305,6 +305,18 @@ class ShatterConfig(Config):
     """Inflation applied to measured source density before shard splitting."""
     stage_worker_address: Union[str, None] = field(default=None)
     """Optional Dask worker address on which to place the stage writer actor."""
+    build_stage_uri: Union[str, None] = field(default=None)
+    """Durable URI for immutable macro-v4 staged arrays."""
+    build_ledger_uri: Union[str, None] = field(default=None)
+    """Durable URI for append-only macro-v4 build receipts."""
+    build_publish_concurrency: int = field(default=4)
+    """Maximum concurrent writers allowed to commit the canonical array."""
+    build_stage_retries: int = field(default=2)
+    """Safe Dask retries; every attempt receives a new stage URI."""
+    build_publish_vfs_parallel_ops: int = field(default=4)
+    """Maximum TileDB S3 VFS operations per canonical-array publisher."""
+    build_stage_vfs_parallel_ops: int = field(default=4)
+    """Maximum TileDB S3 VFS operations for one independent stage writer."""
     start_timestamp: float = field(default=None)
     """The process start timestamp., defaults to None"""
     end_timestamp: float = field(default=None)
@@ -355,11 +367,13 @@ class ShatterConfig(Config):
             'macro-v2',
             'macro-v3-stage-push',
             'macro-v4-single-array',
+            'macro-v4-staged-publish',
         }
         if self.processing_strategy not in strategies:
             raise ValueError(
                 'processing_strategy must be leaf-v1, macro-v2, '
-                'macro-v3-stage-push, or macro-v4-single-array'
+                'macro-v3-stage-push, macro-v4-single-array, or '
+                'macro-v4-staged-publish'
             )
 
         if self.processing_halo_m is not None and self.processing_halo_m < 0:
@@ -369,6 +383,7 @@ class ShatterConfig(Config):
             'macro-v2',
             'macro-v3-stage-push',
             'macro-v4-single-array',
+            'macro-v4-staged-publish',
         }:
             if self.tile_size is None or self.read_group_size is None:
                 raise ValueError(
@@ -449,6 +464,37 @@ class ShatterConfig(Config):
             if self.stage_fragment_size_mb < 1:
                 raise ValueError('stage_fragment_size_mb must be positive')
 
+        if self.processing_strategy == 'macro-v4-staged-publish':
+            if not self.build_stage_uri or not self.build_ledger_uri:
+                raise ValueError(
+                    'macro-v4-staged-publish requires build_stage_uri and '
+                    'build_ledger_uri'
+                )
+            if self.build_stage_uri == self.tdb_dir:
+                raise ValueError(
+                    'build_stage_uri must differ from the canonical tdb_dir'
+                )
+            if self.build_ledger_uri in {
+                self.tdb_dir,
+                self.build_stage_uri,
+            }:
+                raise ValueError(
+                    'build_ledger_uri must differ from canonical and stage URIs'
+                )
+            for field_name, value in {
+                'stage_fragment_size_mb': self.stage_fragment_size_mb,
+                'build_publish_concurrency': self.build_publish_concurrency,
+                'build_stage_retries': self.build_stage_retries,
+                'build_publish_vfs_parallel_ops': (
+                    self.build_publish_vfs_parallel_ops
+                ),
+                'build_stage_vfs_parallel_ops': (
+                    self.build_stage_vfs_parallel_ops
+                ),
+            }.items():
+                if value < 1:
+                    raise ValueError(f'{field_name} must be positive')
+
     @property
     def timestamp(self):
         end_time_temp = int(datetime.now().timestamp() * 1000)
@@ -499,6 +545,16 @@ class ShatterConfig(Config):
                 self.stage_planner_density_safety_factor
             ),
             stage_worker_address=self.stage_worker_address,
+            build_stage_uri=self.build_stage_uri,
+            build_ledger_uri=self.build_ledger_uri,
+            build_publish_concurrency=self.build_publish_concurrency,
+            build_stage_retries=self.build_stage_retries,
+            build_publish_vfs_parallel_ops=(
+                self.build_publish_vfs_parallel_ops
+            ),
+            build_stage_vfs_parallel_ops=(
+                self.build_stage_vfs_parallel_ops
+            ),
             execution_timing=self.execution_timing,
         )
 
@@ -566,6 +622,16 @@ class ShatterConfig(Config):
                 'stage_planner_density_safety_factor', 1.25
             ),
             stage_worker_address=x.get('stage_worker_address'),
+            build_stage_uri=x.get('build_stage_uri'),
+            build_ledger_uri=x.get('build_ledger_uri'),
+            build_publish_concurrency=x.get('build_publish_concurrency', 4),
+            build_stage_retries=x.get('build_stage_retries', 2),
+            build_publish_vfs_parallel_ops=x.get(
+                'build_publish_vfs_parallel_ops', 4
+            ),
+            build_stage_vfs_parallel_ops=x.get(
+                'build_stage_vfs_parallel_ops', 4
+            ),
             execution_timing=x.get('execution_timing', {}),
             start_timestamp=x['start_timestamp'],
             end_timestamp=x['end_timestamp'],

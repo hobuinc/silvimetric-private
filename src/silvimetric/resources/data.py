@@ -28,7 +28,10 @@ class Data:
         self.filename = filename
         """Path to either PDAL pipeline or point cloud file"""
 
-        self.bounds = bounds
+        # Alignment below is a processing detail.  Never mutate the Bounds
+        # object owned by a caller's ShatterConfig: a resumable build must see
+        # identical user inputs when a fresh driver reconstructs its ledger.
+        self.bounds = copy.deepcopy(bounds)
         """Bounds of this section of data"""
 
         if reader_collar is not None and reader_collar < 0:

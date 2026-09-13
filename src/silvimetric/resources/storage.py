@@ -71,6 +71,10 @@ class Storage:
 
         self.config: StorageConfig = config
         self._reader: tiledb.DenseArray = None
+        # TileDB contexts are process-local. Keep only serializable overrides
+        # so a bounded publisher can lower its S3 concurrency after Dask sends
+        # this Storage instance to a worker.
+        self._context_overrides: dict[str, str] = {}
 
     def __enter__(self):
         return self
@@ -498,9 +502,33 @@ class Storage:
                 )
             cfg['sm.compute_concurrency_level'] = str(concurrency_level)
             cfg['sm.io_concurrency_level'] = str(concurrency_level)
-        # cfg['vfs.s3.max_parallel_ops'] = '1'
+        max_parallel_ops = os.environ.get(
+            'SILVIMETRIC_TILEDB_S3_MAX_PARALLEL_OPS'
+        )
+        if max_parallel_ops is not None:
+            try:
+                max_parallel_ops_value = int(max_parallel_ops)
+            except ValueError as error:
+                raise ValueError(
+                    'SILVIMETRIC_TILEDB_S3_MAX_PARALLEL_OPS must be a '
+                    'positive integer'
+                ) from error
+            if max_parallel_ops_value < 1:
+                raise ValueError(
+                    'SILVIMETRIC_TILEDB_S3_MAX_PARALLEL_OPS must be a '
+                    'positive integer'
+                )
+            cfg['vfs.s3.max_parallel_ops'] = str(max_parallel_ops_value)
+        for key, value in getattr(_storage, '_context_overrides', {}).items():
+            cfg[key] = str(value)
         ctx = tiledb.Ctx(cfg)
         return ctx
+
+    def set_context_overrides(self, **overrides: str | int) -> None:
+        """Apply serializable TileDB context overrides to this Storage only."""
+        self._context_overrides = {
+            key: str(value) for key, value in overrides.items()
+        }
 
     def get_attributes(
         self, names: Optional[list[str]] = None
@@ -565,7 +593,7 @@ class Storage:
 
         # tiledb and dask have bad interaction with opening an array if
         # other threads present
-        ctx = self.get_tdb_context()
+        ctx = Storage.get_tdb_context(self)
 
         # non-timestamped reader and writer are stored as member variables to
         # avoid opening and closing too many io objects.
@@ -643,7 +671,7 @@ class Storage:
 
         tiledb.from_pandas(
             uri=self.config.tdb_dir,
-            # ctx=ctx,
+            ctx=Storage.get_tdb_context(self),
             sparse=False,
             dataframe=data_in,
             mode='append',
@@ -844,7 +872,7 @@ class Storage:
     ]
 
     def vacuum(self, mode: ManageType = 'fragments'):
-        c = self.get_tdb_context().config()
+        c = Storage.get_tdb_context(self).config()
         c['sm.vacuum.mode'] = mode
         tiledb.vacuum(
             self.config.tdb_dir,
@@ -868,7 +896,7 @@ class Storage:
         ts_start = timestamp[0] if timestamp is not None else 0
         ts_end_def = int(datetime.now().timestamp() * 1000)
         ts_end = timestamp[1] if timestamp is not None else ts_end_def
-        c = self.get_tdb_context().config()
+        c = Storage.get_tdb_context(self).config()
         c['sm.consolidation.mode'] = mode
         c['sm.consolidation.timestamp_start'] = ts_start
         c['sm.consolidation.timestamp_end'] = ts_end
@@ -894,7 +922,9 @@ class Storage:
             )
         stage_config = copy.deepcopy(source.config)
         stage_config.tdb_dir = stage_tdb_dir
-        return Storage.create(stage_config)
+        return Storage.create(
+            stage_config, ctx=Storage.get_tdb_context(source)
+        )
 
     def set_stage_state(self, state: str, **details) -> None:
         """Persist small, durable stage state alongside the staged array."""
@@ -986,7 +1016,7 @@ class Storage:
         bounding the resulting fragment size.
         """
         target_bytes = int(fragment_size_mb) * 1024 * 1024
-        config = self.get_tdb_context().config()
+        config = Storage.get_tdb_context(self).config()
         config['sm.consolidation.mode'] = 'fragments'
         config['sm.consolidation.step_min_frags'] = '2'
         config['sm.consolidation.step_max_frags'] = '4294967295'

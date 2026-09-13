@@ -96,6 +96,21 @@
   two local Dask workers wrote 108,900 points in 121 populated cells; TileDB
   reports one active consolidated fragment after vacuum. The smoke bucket
   expires its contents after seven days.
+- `macro-v4-staged-publish` is the production-oriented successor to that
+  direct proof. It writes each deterministic macro block to an immutable
+  local/S3 stage, records append-only `planned`/`staged`/`published` receipts,
+  and limits concurrent writers to the canonical array. Re-run with the same
+  `ShatterConfig.name`, canonical URI, and ledger URI: a build signature
+  rejects foreign inputs, completed receipts are reused, a missing publish
+  receipt is reconciled from the canonical count footprint, and a stable time
+  slot is restored. Its final TileDB consolidation/vacuum is deliberately
+  re-enterable. Do not run two drivers against one ledger concurrently.
+- Use `build_publish_concurrency=4`,
+  `build_publish_vfs_parallel_ops=4`, and
+  `build_stage_vfs_parallel_ops=4` as the conservative first S3 fleet
+  settings. The prior Becker failure was many workers each using TileDB's
+  default parallel VFS operations against one fragment prefix. The EC2 runner
+  creates durable S3 stages and ledger beneath `builds/<RunId>/`.
 - `Storage.vacuum()` and the generic `Storage.consolidate()` must retain the
   `Storage.get_tdb_context()` settings. A fresh TileDB context loses the
   S3-region/profile configuration and leaves superseded S3 objects behind.
