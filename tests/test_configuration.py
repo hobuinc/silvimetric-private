@@ -36,6 +36,41 @@ class Test_Configuration(object):
         )
         assert ShatterConfig.from_string(str(config)) == config
 
+    def test_macro_v4_staged_publish_validation_and_serialization(
+        self,
+        storage_config: StorageConfig,
+        shatter_config: ShatterConfig,
+        bounds,
+        tmp_path,
+    ):
+        with pytest.raises(ValueError, match='requires build_stage_uri'):
+            ShatterConfig(
+                tdb_dir=storage_config.tdb_dir,
+                filename=shatter_config.filename,
+                date=shatter_config.date,
+                bounds=bounds,
+                tile_size=4,
+                read_group_size=4,
+                processing_strategy='macro-v4-staged-publish',
+            )
+
+        config = ShatterConfig(
+            tdb_dir=storage_config.tdb_dir,
+            filename=shatter_config.filename,
+            date=shatter_config.date,
+            bounds=bounds,
+            tile_size=4,
+            read_group_size=4,
+            processing_strategy='macro-v4-staged-publish',
+            build_stage_uri=(tmp_path / 'stages').as_posix(),
+            build_ledger_uri=(tmp_path / 'ledger').as_posix(),
+            build_publish_concurrency=2,
+            build_stage_retries=3,
+            build_publish_vfs_parallel_ops=2,
+            build_stage_vfs_parallel_ops=2,
+        )
+        assert ShatterConfig.from_string(str(config)) == config
+
     def test_serialization(
         self,
         storage_config: StorageConfig,

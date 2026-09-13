@@ -320,6 +320,7 @@ def initialize_cmd(
             'macro-v2',
             'macro-v3-stage-push',
             'macro-v4-single-array',
+            'macro-v4-staged-publish',
         ]
     ),
     default='leaf-v1',
@@ -357,7 +358,7 @@ def initialize_cmd(
     show_default=True,
     help=(
         'Desired consolidation-plan fragment size in MiB for macro-v3 local '
-        'stages or the macro-v4 canonical array.'
+        'stages or macro-v4 canonical-array finalization.'
     ),
 )
 @click.option(
@@ -365,6 +366,46 @@ def initialize_cmd(
     type=str,
     default=None,
     help='Optional Dask worker address for the macro-v3 stage writer actor.',
+)
+@click.option(
+    '--build-stage-uri',
+    type=str,
+    default=None,
+    help='Durable local or S3 prefix for immutable macro-v4 stage attempts.',
+)
+@click.option(
+    '--build-ledger-uri',
+    type=str,
+    default=None,
+    help='Durable local or S3 prefix for macro-v4 append-only build records.',
+)
+@click.option(
+    '--build-publish-concurrency',
+    type=int,
+    default=4,
+    show_default=True,
+    help='Maximum concurrent canonical-array publishers for staged macro-v4.',
+)
+@click.option(
+    '--build-stage-retries',
+    type=int,
+    default=2,
+    show_default=True,
+    help='Safe Dask retries for one immutable macro-v4 stage task.',
+)
+@click.option(
+    '--build-publish-vfs-parallel-ops',
+    type=int,
+    default=4,
+    show_default=True,
+    help='TileDB S3 operations allowed per canonical-array publisher.',
+)
+@click.option(
+    '--build-stage-vfs-parallel-ops',
+    type=int,
+    default=4,
+    show_default=True,
+    help='TileDB S3 operations allowed per independent stage writer.',
 )
 @click.option(
     '--report',
@@ -403,6 +444,12 @@ def shatter_cmd(
     stage_publish_uri,
     stage_fragment_size_mb,
     stage_worker_address,
+    build_stage_uri,
+    build_ledger_uri,
+    build_publish_concurrency,
+    build_stage_retries,
+    build_publish_vfs_parallel_ops,
+    build_stage_vfs_parallel_ops,
     date,
     dates,
 ):
@@ -438,6 +485,12 @@ def shatter_cmd(
         stage_publish_uri=stage_publish_uri,
         stage_fragment_size_mb=stage_fragment_size_mb,
         stage_worker_address=stage_worker_address,
+        build_stage_uri=build_stage_uri,
+        build_ledger_uri=build_ledger_uri,
+        build_publish_concurrency=build_publish_concurrency,
+        build_stage_retries=build_stage_retries,
+        build_publish_vfs_parallel_ops=build_publish_vfs_parallel_ops,
+        build_stage_vfs_parallel_ops=build_stage_vfs_parallel_ops,
     )
 
     if report:

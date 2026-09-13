@@ -1,6 +1,7 @@
 import os
 import uuid
 import datetime
+import importlib
 from math import ceil
 import copy
 import pytest
@@ -25,6 +26,10 @@ from silvimetric import (
 )
 from silvimetric import ShatterConfig
 from silvimetric.commands.shatter import plan_macro_blocks
+from silvimetric.resources.build_ledger import BuildLedger
+
+
+shatter_module = importlib.import_module('silvimetric.commands.shatter')
 
 
 @dask.delayed
@@ -526,6 +531,252 @@ class Test_Shatter(object):
         assert executor['mode'] == 'disjoint-blocks-write-one-array'
         assert executor['block_task_count'] >= 2
         assert executor['retries'] == 0
+
+    def test_macro_v4_staged_publish_resumes_from_immutable_ledger(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+        threaded_dask,
+    ):
+        """A sealed build can be restarted without recomputing its macros."""
+        staged_dir = (tmp_path / 'macro-v4-staged.tdb').as_posix()
+        stage_uri = (tmp_path / 'durable-stage').as_posix()
+        ledger_uri = (tmp_path / 'durable-ledger').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = staged_dir
+        Storage.create(staged_storage_config)
+
+        common = dict(
+            tdb_dir=staged_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=stage_uri,
+            build_ledger_uri=ledger_uri,
+            build_publish_concurrency=2,
+            build_publish_vfs_parallel_ops=1,
+        )
+        first = ShatterConfig(name=uuid.uuid4(), **common)
+        assert shatter(first) == test_point_count
+
+        ledger = BuildLedger(ledger_uri)
+        status = first.execution_timing['build_ledger']
+        assert status['states']['published'] == status['planned_block_count']
+        assert not status['partial']
+        sealed = ledger.state('__build__')
+        assert sealed is not None
+        assert sealed.state == 'build_sealed'
+        assert sealed.details['point_count'] == test_point_count
+
+        # Same build name and ledger is the explicit resume contract.  The
+        # run derives point totals from published receipts rather than writing
+        # duplicate fragments for an already sealed build.
+        resumed = ShatterConfig(name=first.name, **common)
+        assert shatter(resumed) == test_point_count
+        resume_status = resumed.execution_timing['build_ledger']
+        assert resume_status['published_block_count'] == (
+            resume_status['planned_block_count']
+        )
+        assert resumed.execution_timing['planner']['distributed_executor'][
+            'stage_task_count'
+        ] == 0
+        assert resumed.time_slot == first.time_slot
+        assert resumed.execution_timing['array']['consolidation_skipped']
+        point_count = Storage.from_db(staged_dir).open('r').df[:, :][
+            'count'
+        ].sum()
+        assert int(point_count) == test_point_count
+
+    def test_macro_v4_staged_publish_recovers_after_publish_failure(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """A failed canonical publish leaves reusable stages and receipts."""
+        staged_dir = (tmp_path / 'macro-v4-partial.tdb').as_posix()
+        stage_uri = (tmp_path / 'partial-stage').as_posix()
+        ledger_uri = (tmp_path / 'partial-ledger').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = staged_dir
+        Storage.create(staged_storage_config)
+        common = dict(
+            tdb_dir=staged_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=stage_uri,
+            build_ledger_uri=ledger_uri,
+            build_publish_concurrency=1,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+        build_id = uuid.uuid4()
+        original = shatter_module.publish_staged_macro_block
+        calls = 0
+
+        def fail_one_publish(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise KeyboardInterrupt('intentional publish interruption')
+            return original(*args, **kwargs)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            shatter_module, 'publish_staged_macro_block', fail_one_publish
+        )
+        try:
+            with pytest.raises(
+                KeyboardInterrupt, match='intentional publish interruption'
+            ):
+                shatter(ShatterConfig(name=build_id, **common))
+        finally:
+            monkeypatch.undo()
+
+        ledger = BuildLedger(ledger_uri)
+        # The build manifest records a partial state while the blocks have
+        # durable staged or published receipts. No successful work is lost.
+        assert ledger.state('__build__').state == 'build_partial'
+        assert calls >= 1
+
+        resumed = ShatterConfig(name=build_id, **common)
+        assert shatter(resumed) == test_point_count
+        summary = resumed.execution_timing['build_ledger']
+        assert summary['published_block_count'] == summary['planned_block_count']
+        assert not summary['partial']
+        point_count = Storage.from_db(staged_dir).open('r').df[:, :][
+            'count'
+        ].sum()
+        assert int(point_count) == test_point_count
+
+    def test_macro_v4_staged_publish_recovers_after_consolidation_interrupt(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """Final consolidation can be safely re-entered after interruption."""
+        staged_dir = (tmp_path / 'macro-v4-consolidate.tdb').as_posix()
+        stage_uri = (tmp_path / 'consolidate-stage').as_posix()
+        ledger_uri = (tmp_path / 'consolidate-ledger').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = staged_dir
+        Storage.create(staged_storage_config)
+        common = dict(
+            tdb_dir=staged_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=stage_uri,
+            build_ledger_uri=ledger_uri,
+            build_publish_concurrency=1,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+        build_id = uuid.uuid4()
+        original = Storage.consolidate_canonical_array
+        calls = 0
+
+        def interrupt_once(self, fragment_size_mb):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError('intentional consolidation interruption')
+            return original(self, fragment_size_mb)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            Storage, 'consolidate_canonical_array', interrupt_once
+        )
+        try:
+            with pytest.raises(
+                RuntimeError, match='intentional consolidation interruption'
+            ):
+                shatter(ShatterConfig(name=build_id, **common))
+        finally:
+            monkeypatch.undo()
+
+        ledger = BuildLedger(ledger_uri)
+        assert ledger.state('__build__').state == 'build_partial'
+
+        resumed = ShatterConfig(name=build_id, **common)
+        assert shatter(resumed) == test_point_count
+        assert resumed.execution_timing['planner']['distributed_executor'][
+            'stage_task_count'
+        ] == 0
+        assert ledger.state('__build__').state == 'build_sealed'
+
+    def test_macro_v4_staged_publish_uses_dask_stages_and_bounded_publishers(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """Stages execute in parallel while canonical writers stay bounded."""
+        staged_dir = (tmp_path / 'macro-v4-distributed.tdb').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = staged_dir
+        Storage.create(staged_storage_config)
+        config = ShatterConfig(
+            name=uuid.uuid4(),
+            tdb_dir=staged_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=(tmp_path / 'distributed-stage').as_posix(),
+            build_ledger_uri=(tmp_path / 'distributed-ledger').as_posix(),
+            build_publish_concurrency=2,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+        with LocalCluster(
+            n_workers=2,
+            threads_per_worker=1,
+            processes=False,
+            dashboard_address=None,
+        ) as cluster:
+            with Client(cluster):
+                assert shatter(config) == test_point_count
+
+        executor = config.execution_timing['planner']['distributed_executor']
+        assert executor['mode'] == 'durable-stages-bounded-canonical-publishers'
+        assert executor['stage_task_count'] >= 2
+        assert executor['publisher_concurrency'] == 2
+        assert executor['publish_retries'] == 0
+        point_count = Storage.from_db(staged_dir).open('r').df[:, :][
+            'count'
+        ].sum()
+        assert int(point_count) == test_point_count
 
     def test_multiple(
         self,

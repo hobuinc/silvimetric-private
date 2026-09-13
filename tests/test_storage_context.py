@@ -15,6 +15,22 @@ def test_tiledb_concurrency_override(monkeypatch):
     assert context.config()['sm.io_concurrency_level'] == '4'
 
 
+def test_tiledb_s3_parallel_operations_can_be_bounded_per_storage(monkeypatch):
+    monkeypatch.setenv('SILVIMETRIC_TILEDB_S3_MAX_PARALLEL_OPS', '12')
+    storage = Storage.__new__(Storage)
+    storage._context_overrides = {}
+    assert (
+        Storage.get_tdb_context(storage).config()['vfs.s3.max_parallel_ops']
+        == '12'
+    )
+
+    storage.set_context_overrides(**{'vfs.s3.max_parallel_ops': 4})
+    assert (
+        Storage.get_tdb_context(storage).config()['vfs.s3.max_parallel_ops']
+        == '4'
+    )
+
+
 def test_storage_serialization_excludes_open_reader():
     storage = Storage.__new__(Storage)
     reader = object()
