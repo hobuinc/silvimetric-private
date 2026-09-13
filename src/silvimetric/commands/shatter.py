@@ -725,7 +725,16 @@ def _block_schema_hash(storage: Storage) -> str:
     an otherwise identical resume into a different schema. Logging is
     similarly not part of the array contract.
     """
-    schema = storage.config.to_json()
+    # The exact document persisted by the canonical array is its storage
+    # contract. Re-serializing callable metric/filter definitions after a
+    # Dask process boundary can change their dill bytes even though the
+    # effective TileDB schema is unchanged.
+    serialized = getattr(storage, '_serialized_config', None)
+    schema = (
+        json.loads(serialized)
+        if serialized is not None
+        else storage.config.to_json()
+    )
     schema.pop('tdb_dir', None)
     schema.pop('next_time_slot', None)
     schema.pop('log', None)

@@ -278,6 +278,12 @@ class Storage:
         config.tdb_dir = tdb_dir
         storage = Storage(config, ctx=ctx)
 
+        # Keep the literal storage contract that was persisted with the
+        # array. StorageConfig includes callable metric/filter definitions;
+        # serializing an equivalent callable again in another Python process
+        # can produce different dill bytes without changing the schema.
+        storage._serialized_config = s
+
         # set the metadata for storage object so we don't have to query again
         storage._reader = reader
 
@@ -387,8 +393,10 @@ class Storage:
         """
         # build metadata, we'll only requery it if we can't find the desired
         # key later
+        serialized = str(self.config)
         with self.open('w') as w:
-            w.meta['config'] = str(self.config)
+            w.meta['config'] = serialized
+        self._serialized_config = serialized
         if self._reader is not None:
             self._reader.reopen()
 

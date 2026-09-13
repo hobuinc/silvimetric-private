@@ -2,6 +2,7 @@ import os
 import uuid
 import datetime
 import importlib
+import cloudpickle
 from math import ceil
 import copy
 import pytest
@@ -85,12 +86,31 @@ class Test_Shatter(object):
         self, storage: Storage, tmp_path
     ):
         """A stage is schema-compatible even though it has a different URI."""
+        canonical = Storage.from_db(storage.config.tdb_dir)
         stage_config = copy.deepcopy(storage.config)
         stage_config.tdb_dir = (tmp_path / 'macro-v4-schema-stage').as_posix()
         stage = Storage.create(stage_config)
 
-        assert shatter_module._block_schema_hash(storage) == (
+        assert shatter_module._block_schema_hash(canonical) == (
             shatter_module._block_schema_hash(stage)
+        )
+
+    def test_macro_v4_schema_identity_survives_dask_serialization(
+        self, storage: Storage
+    ):
+        """A worker must retain the canonical persisted contract verbatim.
+
+        Metric/filter callables are dill-encoded in StorageConfig.  Dask's
+        cloudpickle round trip may legitimately regenerate those encodings;
+        the separate ``_serialized_config`` contract must therefore survive
+        and keep the stage receipt compatible with the canonical publisher.
+        """
+        canonical = Storage.from_db(storage.config.tdb_dir)
+        worker_storage = cloudpickle.loads(cloudpickle.dumps(canonical))
+
+        assert worker_storage._serialized_config == canonical._serialized_config
+        assert shatter_module._block_schema_hash(worker_storage) == (
+            shatter_module._block_schema_hash(canonical)
         )
 
     def test_adaptive_macro_v3_planner_uses_bounded_coarse_estimates(
