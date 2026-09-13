@@ -1551,7 +1551,7 @@ def run_macro_staged_publish(
         while len(active) >= config.build_publish_concurrency:
             future, result = next(stream)
             active.discard(future)
-            if future.status == 'error':
+            if future.status != 'finished':
                 failures.append((future, result))
             else:
                 published_results.append(result)
@@ -1590,7 +1590,7 @@ def run_macro_staged_publish(
         for result in staged_results:
             publish_one(result.block_id, active_publishes, publish_stream)
         for future, result in stage_stream:
-            if future.status == 'error':
+            if future.status != 'finished':
                 failures.append((future, result))
                 continue
             staged_results.append(result)
@@ -1598,7 +1598,7 @@ def run_macro_staged_publish(
         while active_publishes:
             future, result = next(publish_stream)
             active_publishes.discard(future)
-            if future.status == 'error':
+            if future.status != 'finished':
                 failures.append((future, result))
             else:
                 published_results.append(result)
