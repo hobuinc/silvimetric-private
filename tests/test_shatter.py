@@ -81,6 +81,18 @@ def confirm_one_entry(storage, maxy, base, pointcount):
 
 
 class Test_Shatter(object):
+    def test_macro_v4_schema_identity_excludes_storage_uri(
+        self, storage: Storage, tmp_path
+    ):
+        """A stage is schema-compatible even though it has a different URI."""
+        stage_config = copy.deepcopy(storage.config)
+        stage_config.tdb_dir = (tmp_path / 'macro-v4-schema-stage').as_posix()
+        stage = Storage.create(stage_config)
+
+        assert shatter_module._block_schema_hash(storage) == (
+            shatter_module._block_schema_hash(stage)
+        )
+
     def test_adaptive_macro_v3_planner_uses_bounded_coarse_estimates(
         self,
         shatter_config: ShatterConfig,

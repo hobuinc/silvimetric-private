@@ -717,11 +717,16 @@ def _canonical_signature(
 def _block_schema_hash(storage: Storage) -> str:
     """Tie stages to the stable, output-affecting storage definition.
 
-    ``next_time_slot`` is intentionally excluded: reserving a slot is normal
-    build bookkeeping and must not turn an otherwise identical resume into a
-    different schema. Logging is similarly not part of the array contract.
+    ``tdb_dir`` is intentionally excluded: a durable stage and its canonical
+    destination must be distinct arrays, but they have the same schema.  The
+    ledger separately binds a build to its canonical URI, so removing it here
+    does not permit a foreign build to publish. ``next_time_slot`` is also
+    excluded: reserving a slot is normal build bookkeeping and must not turn
+    an otherwise identical resume into a different schema. Logging is
+    similarly not part of the array contract.
     """
     schema = storage.config.to_json()
+    schema.pop('tdb_dir', None)
     schema.pop('next_time_slot', None)
     schema.pop('log', None)
     return hashlib.sha256(
