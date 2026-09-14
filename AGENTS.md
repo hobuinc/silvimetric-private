@@ -90,7 +90,17 @@
   parallel commit order can make its selected fragment list invalid.
 - Regression coverage in `tests/test_shatter.py` verifies macro-v2-equivalent
   extraction and two concurrent Dask writers against one array. The next
-  milestone is a bounded S3 run, then safe stage-and-push/idempotent recovery.
+  milestone is a bounded S3 calibration using adaptive work units.
+- `macro-v4-staged-publish` now records an adaptive ledger plan tree. A
+  `MemoryError`, nanny-memory indication, or final Dask `KilledWorker` records
+  a failed parent and replaces it with deterministic grid-aligned children.
+  Generic task failures remain partial/resumable rather than being silently
+  split. Configure `build_max_split_depth` (default 8) and
+  `build_min_cells_per_side` (default one processing-tile side). The
+  `MN_BeckerCo_1_2021` 1.28 km historical over-memory macro shape is covered
+  by a planner regression test; an injected Dask memory failure verifies
+  split/publish/extract equivalence, and a separate arbitrary stage failure
+  verifies a clean later resume.
 - The bounded S3 proof completed on 2026-09-12 at
   `s3://sm-smoke-056176271256-3b780f15-996a-4e00-a7f1-a7fadcb7bf17/macro-v4-proof/c88ca1fc-bea2-447b-a68f-cbaa4a0898c2/metrics.tdb`:
   two local Dask workers wrote 108,900 points in 121 populated cells; TileDB

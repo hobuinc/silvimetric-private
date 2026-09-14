@@ -313,6 +313,11 @@ class ShatterConfig(Config):
     """Maximum concurrent writers allowed to commit the canonical array."""
     build_stage_retries: int = field(default=2)
     """Safe Dask retries; every attempt receives a new stage URI."""
+    build_max_split_depth: int = field(default=8)
+    """Maximum adaptive spatial subdivisions for one failed macro-v4 block."""
+    build_min_cells_per_side: Union[int, None] = field(default=None)
+    """Smallest adaptive macro-v4 child side in cells; defaults to one
+    processing-tile side."""
     build_publish_vfs_parallel_ops: int = field(default=4)
     """Maximum TileDB S3 VFS operations per canonical-array publisher."""
     build_stage_vfs_parallel_ops: int = field(default=4)
@@ -484,7 +489,7 @@ class ShatterConfig(Config):
             for field_name, value in {
                 'stage_fragment_size_mb': self.stage_fragment_size_mb,
                 'build_publish_concurrency': self.build_publish_concurrency,
-                'build_stage_retries': self.build_stage_retries,
+                'build_max_split_depth': self.build_max_split_depth,
                 'build_publish_vfs_parallel_ops': (
                     self.build_publish_vfs_parallel_ops
                 ),
@@ -494,6 +499,13 @@ class ShatterConfig(Config):
             }.items():
                 if value < 1:
                     raise ValueError(f'{field_name} must be positive')
+            if self.build_stage_retries < 0:
+                raise ValueError('build_stage_retries must not be negative')
+            if (
+                self.build_min_cells_per_side is not None
+                and self.build_min_cells_per_side < 1
+            ):
+                raise ValueError('build_min_cells_per_side must be positive')
 
     @property
     def timestamp(self):
@@ -549,6 +561,8 @@ class ShatterConfig(Config):
             build_ledger_uri=self.build_ledger_uri,
             build_publish_concurrency=self.build_publish_concurrency,
             build_stage_retries=self.build_stage_retries,
+            build_max_split_depth=self.build_max_split_depth,
+            build_min_cells_per_side=self.build_min_cells_per_side,
             build_publish_vfs_parallel_ops=(
                 self.build_publish_vfs_parallel_ops
             ),
@@ -626,6 +640,8 @@ class ShatterConfig(Config):
             build_ledger_uri=x.get('build_ledger_uri'),
             build_publish_concurrency=x.get('build_publish_concurrency', 4),
             build_stage_retries=x.get('build_stage_retries', 2),
+            build_max_split_depth=x.get('build_max_split_depth', 8),
+            build_min_cells_per_side=x.get('build_min_cells_per_side'),
             build_publish_vfs_parallel_ops=x.get(
                 'build_publish_vfs_parallel_ops', 4
             ),

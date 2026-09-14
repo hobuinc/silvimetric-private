@@ -22,13 +22,20 @@ import tiledb
 _STATE_ORDER = {
     'planned': 0,
     'computing': 1,
+    # A failed stage has no durable output receipt.  It remains resumable, and
+    # may be replaced by a spatial ``split`` receipt when resource pressure
+    # proves that the original unit is too large.
+    'failed': 2,
     'staged': 2,
     # Publishing is an observation, not a durable completion.  A restart must
     # resume from the preceding staged receipt unless a published receipt was
     # successfully persisted.
     'publishing': 1,
-    'published': 4,
-    'validated': 5,
+    # ``split`` is a terminal state for a parent work unit only.  Its child
+    # units become the active leaves of the build plan.
+    'split': 4,
+    'published': 5,
+    'validated': 6,
 }
 
 

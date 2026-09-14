@@ -394,6 +394,19 @@ def initialize_cmd(
     help='Safe Dask retries for one immutable macro-v4 stage task.',
 )
 @click.option(
+    '--build-max-split-depth',
+    type=int,
+    default=8,
+    show_default=True,
+    help='Maximum adaptive spatial subdivisions after a macro-v4 stage failure.',
+)
+@click.option(
+    '--build-min-cells-per-side',
+    type=int,
+    default=None,
+    help='Smallest adaptive macro-v4 child side in output cells.',
+)
+@click.option(
     '--build-publish-vfs-parallel-ops',
     type=int,
     default=4,
@@ -448,6 +461,8 @@ def shatter_cmd(
     build_ledger_uri,
     build_publish_concurrency,
     build_stage_retries,
+    build_max_split_depth,
+    build_min_cells_per_side,
     build_publish_vfs_parallel_ops,
     build_stage_vfs_parallel_ops,
     date,
@@ -489,6 +504,8 @@ def shatter_cmd(
         build_ledger_uri=build_ledger_uri,
         build_publish_concurrency=build_publish_concurrency,
         build_stage_retries=build_stage_retries,
+        build_max_split_depth=build_max_split_depth,
+        build_min_cells_per_side=build_min_cells_per_side,
         build_publish_vfs_parallel_ops=build_publish_vfs_parallel_ops,
         build_stage_vfs_parallel_ops=build_stage_vfs_parallel_ops,
     )

@@ -174,6 +174,116 @@ class Test_Shatter(object):
         assert planner['point_multiplier_source'] == 'bounded-native-calibration'
         assert len(planner['calibration_samples']) == 4
 
+    def test_adaptive_planner_subdivides_an_over_limit_singleton_macro(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+    ):
+        """A point cap remains a cap after a block reaches one macro."""
+
+        class UniformDenseData:
+            def estimate_count(self, bounds, reader_resolution=None):
+                area = (bounds.maxx - bounds.minx) * (
+                    bounds.maxy - bounds.miny
+                )
+                return int(area)
+
+            def count(self, bounds):
+                return self.estimate_count(bounds)
+
+        shatter_config.tile_size = 1
+        shatter_config.read_group_size = 4
+        shatter_config.processing_strategy = 'macro-v3-stage-push'
+        shatter_config.stage_tdb_dir = '/private/tmp/singleton-stage.tdb'
+        shatter_config.stage_publish_uri = '/private/tmp/singleton-output.tdb'
+        shatter_config.stage_shard_target_points = 1_200
+        shatter_config.stage_planner_resolution_multiple = 2
+        shatter_config.build_max_split_depth = 8
+        shatter_config.build_min_cells_per_side = 1
+        root = Bounds(0, 0, 160, 160)
+        singleton = [
+            Extents(
+                root,
+                storage.config.resolution,
+                storage.config.alignment,
+                root,
+            )
+        ]
+
+        blocks, planner = plan_macro_blocks(
+            singleton, shatter_config, storage, UniformDenseData()
+        )
+
+        assert len(blocks) > 1
+        assert all(
+            window['estimated_max_points'] <= 1_200
+            for window in planner['windows']
+        )
+
+    def test_stage_failure_classifier_recognizes_dask_killed_worker(self):
+        class KilledWorker(Exception):
+            pass
+
+        assert shatter_module._stage_failure_kind(KilledWorker()) == (
+            'worker_lost_after_retries'
+        )
+
+    def test_adaptive_planner_splits_the_historic_becker_memory_shape(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+    ):
+        """The former 1.28 km Becker singleton must not reach a worker whole."""
+
+        class BeckerDensityData:
+            density = 14.52064
+
+            def estimate_count(self, bounds, reader_resolution=None):
+                area = (bounds.maxx - bounds.minx) * (
+                    bounds.maxy - bounds.miny
+                )
+                return int(area / 160**2)
+
+            def count(self, bounds):
+                area = (bounds.maxx - bounds.minx) * (
+                    bounds.maxy - bounds.miny
+                )
+                return int(area * self.density)
+
+        shatter_config.tile_size = 4
+        shatter_config.read_group_size = 4624
+        shatter_config.processing_strategy = 'macro-v4-staged-publish'
+        shatter_config.build_stage_uri = '/private/tmp/becker-stages'
+        shatter_config.build_ledger_uri = '/private/tmp/becker-ledger'
+        shatter_config.stage_shard_target_points = 15_000_000
+        shatter_config.stage_planner_resolution_multiple = 8
+        shatter_config.build_max_split_depth = 8
+        shatter_config.build_min_cells_per_side = 2
+        historic_bounds = Bounds(
+            -10657890.0,
+            5931810.0,
+            -10656610.0,
+            5933030.0,
+        )
+        singleton = [
+            Extents(
+                historic_bounds,
+                20.0,
+                storage.config.alignment,
+                historic_bounds,
+            )
+        ]
+
+        blocks, planner = plan_macro_blocks(
+            singleton, shatter_config, storage, BeckerDensityData()
+        )
+
+        assert len(blocks) > 1
+        assert all(
+            window['estimated_max_points'] <= 15_000_000
+            for window in planner['windows']
+        )
+
     def test_adaptive_macro_v3_planner_does_not_treat_cells_as_raw_points(
         self,
         shatter_config: ShatterConfig,
@@ -815,6 +925,242 @@ class Test_Shatter(object):
             'count'
         ].sum()
         assert int(point_count) == test_point_count
+
+    def test_macro_v4_adaptively_splits_a_memory_limited_stage(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """A known memory failure is replaced by disjoint durable children."""
+        staged_dir = (tmp_path / 'macro-v4-adaptive-memory.tdb').as_posix()
+        stage_uri = (tmp_path / 'adaptive-memory-stage').as_posix()
+        ledger_uri = (tmp_path / 'adaptive-memory-ledger').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = staged_dir
+        Storage.create(staged_storage_config)
+        config = ShatterConfig(
+            name=uuid.uuid4(),
+            tdb_dir=staged_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=stage_uri,
+            build_ledger_uri=ledger_uri,
+            build_publish_concurrency=1,
+            build_stage_retries=0,
+            build_max_split_depth=1,
+            build_min_cells_per_side=1,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+        original = shatter_module.stage_macro_block
+        failure_marker = tmp_path / 'one-memory-failure'
+
+        def fail_one_parent(macros, *args, **kwargs):
+            block_id = shatter_module._shard_name(macros)
+            try:
+                with failure_marker.open('x', encoding='utf8') as marker:
+                    marker.write(block_id)
+                raise MemoryError('known over-memory-limit macro')
+            except FileExistsError:
+                pass
+            return original(macros, *args, **kwargs)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(shatter_module, 'stage_macro_block', fail_one_parent)
+        try:
+            with LocalCluster(
+                n_workers=2,
+                threads_per_worker=1,
+                processes=False,
+                dashboard_address=None,
+            ) as cluster:
+                with Client(cluster):
+                    assert shatter(config) == test_point_count
+        finally:
+            monkeypatch.undo()
+
+        ledger = BuildLedger(ledger_uri)
+        parent_id = failure_marker.read_text(encoding='utf8')
+        split_records = [
+            record
+            for record in ledger.records(parent_id)
+            if record.state == 'split'
+        ]
+        assert len(split_records) == 1
+        children = split_records[0].details['children']
+        parent_records = ledger.records(parent_id)
+        assert len(
+            [record for record in parent_records if record.state == 'failed']
+        ) == 1
+        assert not any(
+            record.state in {'staged', 'published'}
+            for record in parent_records
+        )
+        assert len(children) == 2
+        assert all(
+            ledger.state(child['block_id']).state == 'published'
+            for child in children
+        )
+        executor = config.execution_timing['planner']['distributed_executor']
+        assert executor['adaptive_split_count'] == 1
+        assert executor['adaptive_splits'] == [
+            {
+                'parent_id': parent_id,
+                'failure_kind': 'memory_pressure',
+                'split_depth': 0,
+                'child_ids': [child['block_id'] for child in children],
+            }
+        ]
+        assert config.execution_timing['build_ledger']['root_block_count'] < (
+            config.execution_timing['build_ledger']['planned_block_count']
+        )
+        assert config.execution_timing['build_ledger']['adaptive_split_count'] == 1
+        point_count = Storage.from_db(staged_dir).open('r').df[:, :][
+            'count'
+        ].sum()
+        assert int(point_count) == test_point_count
+
+        # Subdivision changes only read scheduling.  A fresh extract must
+        # remain pixel-identical to the established non-staged macro path.
+        baseline_dir = (tmp_path / 'macro-v2-memory-baseline.tdb').as_posix()
+        baseline_storage_config = copy.deepcopy(storage.config)
+        baseline_storage_config.tdb_dir = baseline_dir
+        Storage.create(baseline_storage_config)
+        baseline = ShatterConfig(
+            tdb_dir=baseline_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v2',
+        )
+        assert shatter(baseline) == test_point_count
+        baseline_output = tmp_path / 'macro-v2-memory-baseline'
+        adaptive_output = tmp_path / 'macro-v4-memory-adaptive'
+        for database, output in (
+            (baseline_dir, baseline_output),
+            (staged_dir, adaptive_output),
+        ):
+            extract(
+                ExtractConfig(
+                    tdb_dir=database,
+                    out_dir=str(output),
+                    bounds=shatter_config.bounds,
+                    date=shatter_config.date,
+                )
+            )
+        baseline_rasters = {
+            path.name: path for path in Path(baseline_output).glob('*.tif')
+        }
+        adaptive_rasters = {
+            path.name: path for path in Path(adaptive_output).glob('*.tif')
+        }
+        assert baseline_rasters.keys() == adaptive_rasters.keys()
+        for name in baseline_rasters:
+            left = gdal.Open(str(baseline_rasters[name]))
+            right = gdal.Open(str(adaptive_rasters[name]))
+            np.testing.assert_equal(
+                left.GetRasterBand(1).ReadAsArray(),
+                right.GetRasterBand(1).ReadAsArray()
+            )
+
+    def test_macro_v4_stage_failure_remains_resumable(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """An arbitrary worker/task failure leaves a clean resumable ledger."""
+        staged_dir = (tmp_path / 'macro-v4-stage-recovery.tdb').as_posix()
+        stage_uri = (tmp_path / 'stage-recovery-stage').as_posix()
+        ledger_uri = (tmp_path / 'stage-recovery-ledger').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = staged_dir
+        Storage.create(staged_storage_config)
+        common = dict(
+            tdb_dir=staged_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=stage_uri,
+            build_ledger_uri=ledger_uri,
+            build_publish_concurrency=1,
+            build_stage_retries=0,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+        build_id = uuid.uuid4()
+        original = shatter_module.stage_macro_block
+        failure_marker = tmp_path / 'one-worker-failure'
+
+        def fail_one_stage(macros, *args, **kwargs):
+            try:
+                with failure_marker.open('x', encoding='utf8') as marker:
+                    marker.write(shatter_module._shard_name(macros))
+                raise RuntimeError('simulated worker loss outside task control')
+            except FileExistsError:
+                pass
+            return original(macros, *args, **kwargs)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(shatter_module, 'stage_macro_block', fail_one_stage)
+        try:
+            with LocalCluster(
+                n_workers=2,
+                threads_per_worker=1,
+                processes=False,
+                dashboard_address=None,
+            ) as cluster:
+                with Client(cluster):
+                    with pytest.raises(RuntimeError, match='simulated worker loss'):
+                        shatter(ShatterConfig(name=build_id, **common))
+        finally:
+            monkeypatch.undo()
+
+        ledger = BuildLedger(ledger_uri)
+        assert ledger.state('__build__').state == 'build_partial'
+        failed_id = failure_marker.read_text(encoding='utf8')
+        assert ledger.state(failed_id).state == 'failed'
+
+        with LocalCluster(
+            n_workers=2,
+            threads_per_worker=1,
+            processes=False,
+            dashboard_address=None,
+        ) as cluster:
+            with Client(cluster):
+                resumed = ShatterConfig(name=build_id, **common)
+                assert shatter(resumed) == test_point_count
+
+        assert resumed.execution_timing['planner']['distributed_executor'][
+            'stage_task_count'
+        ] == 1
+
+        # The published output is enough to prove recovery; do not run a
+        # third time merely to inspect timing.
+        point_count = Storage.from_db(staged_dir).open('r').df[:, :][
+            'count'
+        ].sum()
+        assert int(point_count) == test_point_count
+        assert ledger.state('__build__').state == 'build_sealed'
 
     def test_multiple(
         self,

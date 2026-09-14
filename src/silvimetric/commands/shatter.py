@@ -1474,6 +1474,158 @@ def run_macro_to_single_array(
     return config.point_count
 
 
+def _stage_failure_kind(error: object) -> str:
+    """Classify a final stage-task failure without trusting worker-local state.
+
+    A Dask nanny can kill the entire worker process, so the Python task often
+    cannot raise ``MemoryError`` itself.  Dask reports that condition as a
+    ``KilledWorker`` failure after its configured retries.  Splitting that
+    block is safe because it has no durable stage receipt yet; ordinary
+    application errors remain resumable but are not silently subdivided.
+    """
+    error_type = type(error).__name__
+    text = f'{error_type}: {error}'.lower()
+    if isinstance(error, MemoryError) or 'memory' in text or 'nanny' in text:
+        return 'memory_pressure'
+    if 'killedworker' in text or 'worker died' in text:
+        return 'worker_lost_after_retries'
+    return 'task_error'
+
+
+def _ledger_block_details(
+    macros: list[Extents], *, parent_id: str | None, split_depth: int
+) -> dict:
+    """Return the durable reconstruction data for one adaptive work unit."""
+    return {
+        'bounds': _block_bounds(macros).get(),
+        'macro_count': len(macros),
+        'macro_bounds': _block_descriptor(macros),
+        'parent_id': parent_id,
+        'split_depth': split_depth,
+    }
+
+
+def _active_ledger_blocks(
+    root_blocks: dict[str, list[Extents]],
+    ledger: BuildLedger,
+    storage: Storage,
+) -> dict[str, tuple[list[Extents], int]]:
+    """Resolve the active leaves of the append-only adaptive plan tree."""
+    active: dict[str, tuple[list[Extents], int]] = {}
+    pending = [
+        (block_id, macros, 0)
+        for block_id, macros in sorted(root_blocks.items())
+    ]
+    while pending:
+        block_id, macros, depth = pending.pop()
+        record = ledger.state(block_id)
+        if record is None or record.state != 'split':
+            if record is not None:
+                depth = int(record.details.get('split_depth', depth))
+            active[block_id] = (macros, depth)
+            continue
+
+        children = record.details.get('children')
+        if not children:
+            raise RuntimeError(
+                f'Adaptive split receipt for {block_id!r} has no children.'
+            )
+        for child in children:
+            child_id = child['block_id']
+            descriptor = child.get('macro_bounds')
+            if descriptor is None:
+                child_record = ledger.state(child_id)
+                descriptor = (
+                    child_record.details.get('macro_bounds')
+                    if child_record is not None
+                    else None
+                )
+            if descriptor is None:
+                raise RuntimeError(
+                    f'Adaptive split child {child_id!r} has no macro bounds.'
+                )
+            pending.append(
+                (
+                    child_id,
+                    _block_from_descriptor(descriptor, storage),
+                    int(child.get('split_depth', depth + 1)),
+                )
+            )
+    return active
+
+
+def _split_failed_stage_block(
+    block_id: str,
+    macros: list[Extents],
+    split_depth: int,
+    error: object,
+    config: ShatterConfig,
+    ledger: BuildLedger,
+) -> list[tuple[str, list[Extents], int]]:
+    """Record a failed stage and replace a resource-limited parent by children.
+
+    Only an un-staged block can reach this function.  Its children therefore
+    cover new, disjoint canonical ranges and use new immutable stage prefixes;
+    no successful read, stage, or canonical write is discarded or duplicated.
+    """
+    kind = _stage_failure_kind(error)
+    ledger.append(
+        block_id,
+        'failed',
+        failure_kind=kind,
+        error_type=type(error).__name__,
+        error=str(error)[:2000],
+        split_depth=split_depth,
+    )
+    if kind not in {'memory_pressure', 'worker_lost_after_retries'}:
+        return []
+    if split_depth >= config.build_max_split_depth:
+        return []
+    children = split_macro_block_once(macros, config)
+    if not children:
+        return []
+
+    child_records = []
+    for child in children:
+        child_id = _shard_name(child)
+        if child_id == block_id:
+            raise RuntimeError(
+                f'Adaptive split of {block_id!r} did not reduce its bounds.'
+            )
+        child_records.append(
+            {
+                'block_id': child_id,
+                'macro_bounds': _block_descriptor(child),
+                'bounds': _block_bounds(child).get(),
+                'split_depth': split_depth + 1,
+            }
+        )
+    if len({child['block_id'] for child in child_records}) != len(child_records):
+        raise RuntimeError(f'Adaptive split of {block_id!r} has duplicate children.')
+
+    ledger.append(
+        block_id,
+        'split',
+        failure_kind=kind,
+        split_depth=split_depth,
+        children=child_records,
+    )
+    for child, child_record in zip(children, child_records):
+        ledger.append(
+            child_record['block_id'],
+            'planned',
+            **_ledger_block_details(
+                child,
+                parent_id=block_id,
+                split_depth=split_depth + 1,
+            ),
+        )
+    return [
+        (child['block_id'], macros, split_depth + 1)
+        for child, macros in zip(child_records, children)
+    ]
+
+
 def run_macro_staged_publish(
     macros: Leaves,
     config: ShatterConfig,
@@ -1492,13 +1644,16 @@ def run_macro_staged_publish(
     macro_blocks, planner = plan_macro_blocks(
         list(macros), config, storage, data
     )
-    blocks_by_id = {_shard_name(block): block for block in macro_blocks}
-    if len(blocks_by_id) != len(macro_blocks):
+    root_blocks = {_shard_name(block): block for block in macro_blocks}
+    if len(root_blocks) != len(macro_blocks):
         raise RuntimeError('Macro-v4 planner produced non-unique block IDs.')
-    block_ids = sorted(blocks_by_id)
+    root_block_ids = sorted(root_blocks)
     ledger = BuildLedger(config.build_ledger_uri, Storage.get_tdb_context(storage))
-    build_signature = _build_signature(config, storage, block_ids)
-    build_inputs = _build_inputs(config, storage, block_ids)
+    # Identity binds the immutable root plan.  Runtime resource failures may
+    # add ledger children below those roots without making a valid recovery
+    # look like a foreign build.
+    build_signature = _build_signature(config, storage, root_block_ids)
+    build_inputs = _build_inputs(config, storage, root_block_ids)
     original_manifest = ledger.build_manifest()
     resumed_build = ledger.assert_build_identity(
         build_id=str(config.name),
@@ -1512,7 +1667,7 @@ def run_macro_staged_publish(
             'build_started',
             build_id=str(config.name),
             canonical_uri=config.tdb_dir,
-            planned_block_count=len(block_ids),
+            planned_block_count=len(root_block_ids),
             schema_sha256=_block_schema_hash(storage),
             build_signature=build_signature,
             build_inputs=build_inputs,
@@ -1535,31 +1690,40 @@ def run_macro_staged_publish(
     # worker-stage metadata and canonical history describe one logical build.
     storage.save_shatter_meta(config)
 
-    staged_results: list[MacroTaskResult] = []
-    published_results: list[MacroTaskResult] = []
-    stage_candidates: list[list[Extents]] = []
-    for block_id in block_ids:
-        record = ledger.state(block_id)
-        if record is None:
+    # Persist enough information to reconstruct every root on a later driver.
+    # New adaptive children carry equivalent descriptors in their own planned
+    # receipts and in the parent's immutable split receipt.
+    for block_id in root_block_ids:
+        if ledger.state(block_id) is None:
             ledger.append(
                 block_id,
                 'planned',
-                bounds=_block_bounds(blocks_by_id[block_id]).get(),
-                macro_count=len(blocks_by_id[block_id]),
+                **_ledger_block_details(
+                    root_blocks[block_id], parent_id=None, split_depth=0
+                ),
             )
-            stage_candidates.append(blocks_by_id[block_id])
-        elif record.state == 'published':
+
+    staged_results: list[MacroTaskResult] = []
+    published_results: list[MacroTaskResult] = []
+    stage_candidates: list[tuple[str, list[Extents], int]] = []
+    active_blocks = _active_ledger_blocks(root_blocks, ledger, storage)
+    for block_id, (block, split_depth) in sorted(active_blocks.items()):
+        record = ledger.state(block_id)
+        if record is not None and record.state == 'published':
             published_results.append(_result_from_details(record.details))
-        elif record.state == 'staged':
+        elif record is not None and record.state == 'staged':
             resumed = _result_from_details(
                 record.details, stage_uri=record.details.get('stage_uri')
             )
             resumed.block_id = block_id
             staged_results.append(resumed)
         else:
-            stage_candidates.append(blocks_by_id[block_id])
+            stage_candidates.append((block_id, block, split_depth))
 
     failures = []
+    adaptive_split_count = 0
+    adaptive_splits = []
+    dc = get_client()
 
     def publish_one(block_id: str, active, stream) -> None:
         while len(active) >= config.build_publish_concurrency:
@@ -1579,36 +1743,73 @@ def run_macro_staged_publish(
         active.add(future)
         stream.add(future)
 
-    dc = get_client()
     if dc is not None:
         if not dc.scheduler_info()['workers']:
             raise RuntimeError(
                 'macro-v4-staged-publish requires at least one Dask worker'
             )
-        stage_futures = [
-            dc.submit(
-                stage_macro_block,
-                macros=block,
-                config=config,
-                storage=storage,
-                ledger_uri=config.build_ledger_uri,
-                retries=config.build_stage_retries,
-            )
-            for block in stage_candidates
-        ]
-        stage_stream = as_completed(
-            stage_futures, with_results=True, raise_errors=False
-        )
         publish_stream = as_completed([], with_results=True, raise_errors=False)
         active_publishes = set()
+        stage_task_count = 0
+        resumed_staged_block_count = len(staged_results)
         for result in staged_results:
             publish_one(result.block_id, active_publishes, publish_stream)
-        for future, result in stage_stream:
-            if future.status != 'finished':
-                failures.append((future, result))
-                continue
-            staged_results.append(result)
-            publish_one(result.block_id, active_publishes, publish_stream)
+
+        # A Dask retry handles ordinary transient worker loss.  When the
+        # final failure reports resource pressure (or exhausted KilledWorker
+        # retries), append a split receipt and submit only the new children.
+        # All prior stages and publishes remain immutable and reusable.
+        while stage_candidates:
+            future_blocks = {}
+            stage_futures = []
+            for block_id, block, split_depth in stage_candidates:
+                future = dc.submit(
+                    stage_macro_block,
+                    macros=block,
+                    config=config,
+                    storage=storage,
+                    ledger_uri=config.build_ledger_uri,
+                    retries=config.build_stage_retries,
+                )
+                future_blocks[future] = (block_id, block, split_depth)
+                stage_futures.append(future)
+            stage_task_count += len(stage_futures)
+            stage_candidates = []
+            stage_stream = as_completed(
+                stage_futures, with_results=True, raise_errors=False
+            )
+            for future, result in stage_stream:
+                block_id, block, split_depth = future_blocks[future]
+                if future.status != 'finished':
+                    children = _split_failed_stage_block(
+                        block_id,
+                        block,
+                        split_depth,
+                        result,
+                        config,
+                        ledger,
+                    )
+                    if children:
+                        adaptive_split_count += 1
+                        split_receipt = ledger.state(block_id)
+                        adaptive_splits.append(
+                            {
+                                'parent_id': block_id,
+                                'failure_kind': split_receipt.details[
+                                    'failure_kind'
+                                ],
+                                'split_depth': split_depth,
+                                'child_ids': [
+                                    child_id for child_id, _, _ in children
+                                ],
+                            }
+                        )
+                        stage_candidates.extend(children)
+                    else:
+                        failures.append((future, result))
+                    continue
+                staged_results.append(result)
+                publish_one(result.block_id, active_publishes, publish_stream)
         while active_publishes:
             future, result = next(publish_stream)
             active_publishes.discard(future)
@@ -1618,24 +1819,57 @@ def run_macro_staged_publish(
                 published_results.append(result)
         planner['distributed_executor'] = {
             'mode': 'durable-stages-bounded-canonical-publishers',
-            'stage_task_count': len(stage_futures),
-            'resume_staged_block_count': len(staged_results) - len(stage_futures),
+            'stage_task_count': stage_task_count,
+            'resume_staged_block_count': resumed_staged_block_count,
             'publisher_concurrency': config.build_publish_concurrency,
             'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
             'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,
             'stage_retries': config.build_stage_retries,
             'publish_retries': 0,
+            'adaptive_split_count': adaptive_split_count,
+            'adaptive_splits': adaptive_splits,
         }
     else:
-        for block in stage_candidates:
-            try:
-                staged_results.append(
-                    stage_macro_block(
-                        block, config, storage, config.build_ledger_uri
+        stage_task_count = 0
+        resumed_staged_block_count = len(staged_results)
+        while stage_candidates:
+            pending_candidates = stage_candidates
+            stage_candidates = []
+            for block_id, block, split_depth in pending_candidates:
+                stage_task_count += 1
+                try:
+                    staged_results.append(
+                        stage_macro_block(
+                            block, config, storage, config.build_ledger_uri
+                        )
                     )
-                )
-            except Exception as error:
-                failures.append((None, error))
+                except Exception as error:
+                    children = _split_failed_stage_block(
+                        block_id,
+                        block,
+                        split_depth,
+                        error,
+                        config,
+                        ledger,
+                    )
+                    if children:
+                        adaptive_split_count += 1
+                        split_receipt = ledger.state(block_id)
+                        adaptive_splits.append(
+                            {
+                                'parent_id': block_id,
+                                'failure_kind': split_receipt.details[
+                                    'failure_kind'
+                                ],
+                                'split_depth': split_depth,
+                                'child_ids': [
+                                    child_id for child_id, _, _ in children
+                                ],
+                            }
+                        )
+                        stage_candidates.extend(children)
+                    else:
+                        failures.append((None, error))
         for result in staged_results:
             try:
                 published_results.append(
@@ -1647,19 +1881,22 @@ def run_macro_staged_publish(
                 failures.append((None, error))
         planner['distributed_executor'] = {
             'mode': 'local-durable-stages-bounded-canonical-publishers',
-            'stage_task_count': len(stage_candidates),
-            'resume_staged_block_count': len(staged_results)
-            - len(stage_candidates),
+            'stage_task_count': stage_task_count,
+            'resume_staged_block_count': resumed_staged_block_count,
             'publisher_concurrency': 1,
             'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
             'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,
             'stage_retries': 0,
             'publish_retries': 0,
+            'adaptive_split_count': adaptive_split_count,
+            'adaptive_splits': adaptive_splits,
         }
 
     # Each block has at most one stable published receipt.  Compute the total
     # from ledger state so a resumed driver cannot double-count prior work.
-    summary = ledger.summary(block_ids)
+    active_blocks = _active_ledger_blocks(root_blocks, ledger, storage)
+    active_block_ids = sorted(active_blocks)
+    summary = ledger.summary(active_block_ids)
     published_records = [
         record
         for record in summary['records'].values()
@@ -1681,18 +1918,22 @@ def run_macro_staged_publish(
         'build_signature': build_signature,
         'states': summary['states'],
         'published_block_count': len(published_records),
-        'planned_block_count': len(block_ids),
-        'partial': bool(failures) or len(published_records) != len(block_ids),
+        'planned_block_count': len(active_block_ids),
+        'root_block_count': len(root_block_ids),
+        'adaptive_split_count': adaptive_split_count,
+        'partial': bool(failures)
+        or len(published_records) != len(active_block_ids),
     }
     config.execution_timing = timing
 
-    if failures or len(published_records) != len(block_ids):
+    if failures or len(published_records) != len(active_block_ids):
         ledger.append(
             '__build__',
             'build_partial',
             build_id=str(config.name),
             published_block_count=len(published_records),
-            planned_block_count=len(block_ids),
+            planned_block_count=len(active_block_ids),
+            root_block_count=len(root_block_ids),
             failed_task_count=len(failures),
         )
         if failures:
@@ -1741,7 +1982,8 @@ def run_macro_staged_publish(
     seal = {
         'build_id': str(config.name),
         'build_state': 'sealed',
-        'planned_block_count': len(block_ids),
+        'planned_block_count': len(active_block_ids),
+        'root_block_count': len(root_block_ids),
         'published_block_count': len(published_records),
         'point_count': config.point_count,
         'fragment_count': len(fragments_after),
@@ -1801,6 +2043,99 @@ def _block_bounds(macros: list[Extents]) -> Bounds:
         max(macro.bounds.maxx for macro in macros),
         max(macro.bounds.maxy for macro in macros),
     )
+
+
+def _block_descriptor(macros: list[Extents]) -> list[list[float]]:
+    """Serialize the exact, grid-aligned macro cores of one work unit."""
+    return [macro.bounds.get() for macro in macros]
+
+
+def _block_from_descriptor(
+    descriptor: list[list[float]], storage: Storage
+) -> list[Extents]:
+    """Reconstruct a durable work-unit descriptor on a resumed driver."""
+    return [
+        Extents(
+            Bounds(*bounds),
+            storage.config.resolution,
+            storage.config.alignment,
+            storage.config.root,
+        )
+        for bounds in descriptor
+    ]
+
+
+def _adaptive_min_cells(config: ShatterConfig) -> int:
+    """Return the smallest safe adaptive child side in output cells."""
+    if config.build_min_cells_per_side is not None:
+        return config.build_min_cells_per_side
+    return max(math.isqrt(config.tile_size), 1)
+
+
+def split_macro_block_once(
+    macros: list[Extents], config: ShatterConfig
+) -> list[list[Extents]]:
+    """Divide one failed spatial work unit into deterministic grid children.
+
+    A multi-macro work unit is bisected between existing macro cores.  A
+    singleton macro is bisected along its longest cell dimension.  The latter
+    is essential for dense EPT/COPC areas: a point cap is not an effective
+    safety limit if the planner treats one macro as indivisible.
+    """
+    if len(macros) > 1:
+        bounds = _block_bounds(macros)
+        split_x = (bounds.maxx - bounds.minx) >= (bounds.maxy - bounds.miny)
+        key = (
+            (lambda macro: (macro.bounds.minx, macro.bounds.miny))
+            if split_x
+            else (lambda macro: (macro.bounds.miny, macro.bounds.minx))
+        )
+        ordered = sorted(macros, key=key)
+        midpoint = len(ordered) // 2
+        return [ordered[:midpoint], ordered[midpoint:]]
+
+    macro = macros[0]
+    min_side = _adaptive_min_cells(config)
+    x_cells = macro.x2 - macro.x1
+    y_cells = macro.y2 - macro.y1
+    split_x = x_cells >= y_cells
+    if split_x and x_cells < 2 * min_side:
+        split_x = False
+    if not split_x and y_cells < 2 * min_side:
+        if x_cells < 2 * min_side:
+            return []
+        split_x = True
+
+    minx, miny, maxx, maxy = macro.bounds.get()
+    if split_x:
+        offset_cells = x_cells // 2
+        if offset_cells < min_side or x_cells - offset_cells < min_side:
+            return []
+        split = minx + offset_cells * macro.resolution
+        bounds = [
+            Bounds(minx, miny, split, maxy),
+            Bounds(split, miny, maxx, maxy),
+        ]
+    else:
+        offset_cells = y_cells // 2
+        if offset_cells < min_side or y_cells - offset_cells < min_side:
+            return []
+        split = miny + offset_cells * macro.resolution
+        bounds = [
+            Bounds(minx, miny, maxx, split),
+            Bounds(minx, split, maxx, maxy),
+        ]
+    return [
+        [
+            Extents(
+                child,
+                macro.resolution,
+                macro.alignment,
+                macro.root,
+            )
+        ]
+        for child in bounds
+    ]
 
 
 def plan_macro_blocks(
@@ -1943,23 +2278,20 @@ def plan_macro_blocks(
         estimates[name] = details
         return details
 
-    def split(block: list[Extents]) -> list[list[Extents]]:
+    def split(block: list[Extents], depth: int = 0) -> list[list[Extents]]:
         details = estimate(block)
-        if (
-            len(block) == 1
-            or details['estimated_max_points'] <= target
-        ):
+        if details['estimated_max_points'] <= target:
             return [block]
-        bounds = _block_bounds(block)
-        split_x = (bounds.maxx - bounds.minx) >= (bounds.maxy - bounds.miny)
-        key = (
-            (lambda macro: (macro.bounds.minx, macro.bounds.miny))
-            if split_x
-            else (lambda macro: (macro.bounds.miny, macro.bounds.minx))
-        )
-        ordered = sorted(block, key=key)
-        midpoint = len(ordered) // 2
-        return split(ordered[:midpoint]) + split(ordered[midpoint:])
+        children = split_macro_block_once(block, config)
+        if depth >= config.build_max_split_depth or not children:
+            details['split_limit_reached'] = True
+            details['split_depth'] = depth
+            return [block]
+        return [
+            descendant
+            for child in children
+            for descendant in split(child, depth + 1)
+        ]
 
     blocks = split(macros)
     selected = [estimate(block) for block in blocks]
