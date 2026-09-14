@@ -621,6 +621,12 @@ class Test_Shatter(object):
             'stage_task_count'
         ] == 0
         assert resumed.time_slot == first.time_slot
+        # Resuming a sealed build is read-only from the canonical array's
+        # history perspective: it must reuse the original slot rather than
+        # leave an empty reservation behind.
+        assert Storage.from_db(staged_dir).config.next_time_slot == (
+            first.time_slot + 1
+        )
         assert resumed.execution_timing['array']['consolidation_skipped']
         point_count = Storage.from_db(staged_dir).open('r').df[:, :][
             'count'

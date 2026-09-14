@@ -729,7 +729,15 @@ class Storage:
 
         m = []
         for idx in range(1, self.config.next_time_slot):
-            s = self.get_shatter_meta(idx)
+            # Slot reservation is intentionally monotonic.  A process can
+            # therefore reserve a slot and fail before its history metadata
+            # is committed; macro-v4 recovery also reuses its original slot.
+            # Such a sparse slot is not a corrupt history and must not hide
+            # every valid earlier/later run from ``silvimetric info``.
+            try:
+                s = self.get_shatter_meta(idx)
+            except KeyError:
+                continue
             if s.bounds.disjoint(bounds):
                 continue
 

@@ -2157,7 +2157,29 @@ def shatter(config: ShatterConfig) -> int:
     config.log.debug(f'Extents: {extents}')
 
     if not config.time_slot:  # defaults to 0, which is reserved for storage cfg
-        config.time_slot = storage.reserve_time_slot()
+        if config.processing_strategy == 'macro-v4-staged-publish':
+            # A recovery uses the original build's history slot.  Looking up
+            # that immutable ledger receipt before reserving a new slot keeps
+            # ``next_time_slot`` contiguous and, more importantly, prevents
+            # an otherwise read-only sealed-build verification from mutating
+            # canonical array metadata.
+            ledger = BuildLedger(
+                config.build_ledger_uri, Storage.get_tdb_context(storage)
+            )
+            original_manifest = ledger.build_manifest()
+            if (
+                original_manifest is not None
+                and original_manifest.details.get('build_id') == str(config.name)
+            ):
+                original_time_slot = original_manifest.details.get('time_slot')
+                if original_time_slot is None:
+                    raise ValueError(
+                        'The existing build ledger predates time-slot recovery '
+                        'and cannot safely resume this canonical-array build.'
+                    )
+                config.time_slot = int(original_time_slot)
+        if not config.time_slot:
+            config.time_slot = storage.reserve_time_slot()
 
     if config.processing_strategy == 'macro-v3-stage-push':
         Storage.create_shard_group(storage.config, config.stage_publish_uri)

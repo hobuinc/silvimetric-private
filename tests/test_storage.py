@@ -32,6 +32,18 @@ class Test_Storage(object):
             time_slot = storage.reserve_time_slot()
             assert time_slot == x + 1
 
+    def test_history_ignores_uncommitted_reserved_slots(
+        self, storage, shatter_config
+    ):
+        """An interrupted reservation must not hide an earlier history item."""
+        shatter_config.time_slot = storage.reserve_time_slot()
+        storage.save_shatter_meta(shatter_config)
+        storage.reserve_time_slot()
+
+        history = storage.get_history()
+        assert len(history) == 1
+        assert history[0]['time_slot'] == shatter_config.time_slot
+
     def test_local(self, storage: Storage, attrs: list[Attribute]):
         with storage.open('r') as st:
             sc = st.schema
