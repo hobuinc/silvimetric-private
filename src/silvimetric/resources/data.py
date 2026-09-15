@@ -486,16 +486,34 @@ class Data:
 
     def count(self, bounds: Optional[Bounds] = None) -> int:
         """For the provided bounds, read and count the number of points that are
-        inside them for this instance.
+        inside their complete output-cell footprint for this instance.
 
         :param bounds: query bounding box
         :return: point count
         """
 
         reader = copy.deepcopy(self.get_reader())
+        query_bounds = copy.deepcopy(bounds)
+        if query_bounds is not None:
+            query_bounds.adjust_alignment(
+                self.storageconfig.resolution,
+                self.storageconfig.alignment,
+                origin_x=(
+                    self.storageconfig.root.minx
+                    if self.storageconfig.usgs_albers
+                    else None
+                ),
+                origin_y=(
+                    self.storageconfig.root.maxy
+                    if self.storageconfig.usgs_albers
+                    else None
+                ),
+            )
         self._apply_query_options(
             reader,
-            self._reader_bounds(bounds) if bounds is not None else None,
+            self._reader_bounds(query_bounds)
+            if query_bounds is not None
+            else None,
         )
 
         pipeline = reader.pipeline()
