@@ -118,8 +118,10 @@ def test_profile_reprojects_source_and_keeps_origin_based_pixel_indices(
     )
     np.testing.assert_allclose(
         output['yi'][:128],
-        (USGS_ALBERS_TOP_LEFT_Y - output['Y'][:128]) / RESOLUTION - 1,
+        (USGS_ALBERS_TOP_LEFT_Y - output['Y'][:128]) / RESOLUTION,
     )
+    assert np.all(np.floor(output['xi'][:128]) >= 0)
+    assert np.all(np.floor(output['yi'][:128]) >= 0)
 
 
 def test_profile_cross_database_selection_has_identical_pixel_space(

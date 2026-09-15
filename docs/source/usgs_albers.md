@@ -14,6 +14,24 @@ The profile fixes all of the following storage choices:
 - upper-left outer pixel edge: `(-2493045, 3310005)` metres;
 - complete CONUS grid outer bounds: `[-2493045, 177285, 2342655, 3310005]`.
 
+## Pixel-space origin
+
+The coordinate `(-2493045, 3310005)` is the **zero-based pixel-space
+origin**: it is the upper-left *outer edge* of pixel `(column=0, row=0)`, not
+that pixel's centre.  At resolution `r` metres, a point with Albers coordinate
+`(X, Y)` belongs to:
+
+```text
+column = floor((X - -2493045) / r)
+row    = floor((3310005 - Y) / r)
+```
+
+Thus columns increase eastward and rows increase southward.  Pixel `(0, 0)`
+has outer bounds `[-2493045, 3310005-r, -2493045+r, 3310005]`; its centre is
+`(-2493045 + r/2, 3310005 - r/2)`.  This is also the GDAL geotransform origin,
+with pixel size `(r, -r)`.  Use these same integer row/column values, or the
+same target bounds, to compare any two databases built with this profile.
+
 The full common root is stored in each database schema, but shatter only plans
 the TileDB tiles intersecting the supplied source footprint.  Initializing a
 small collection therefore does not enumerate or materialize empty CONUS
@@ -52,4 +70,3 @@ The TileDB GDAL PAM document and extracted GeoTIFFs describe a north-up
 pixel-is-area grid: their geotransform begins at the fixed outer edge and has
 negative Y pixel size.  This means GDAL, rasterio, and xarray selections have
 the same row/column interpretation as the TileDB array.
-

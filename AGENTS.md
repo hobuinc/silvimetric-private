@@ -85,6 +85,9 @@
   ordinary databases.  Its optional bounds are target EPSG:5070 bounds; the
   reader query is transformed to the source CRS, then PDAL reprojects and
   crops before Silvimetric calculates global pixel indices.
+- Profile row zero is the northmost pixel area immediately below the fixed
+  top edge.  Its Y index is `floor((3310005 - Y) / resolution)`; do not apply
+  the legacy centre-grid `-1` row offset to profile writes.
 - Never enumerate profile root tiles.  Use
   `Extents.get_root_aligned_leaf_children()` so scheduling remains bounded to
   the input footprint while preserving physical TileDB tile boundaries.

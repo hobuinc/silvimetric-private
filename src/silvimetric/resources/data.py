@@ -221,9 +221,15 @@ class Data:
         assign_x = pdal.Filter.assign(
             value=f'xi = (X - {self.storageconfig.root.minx}) / {resolution}'
         )
+        # The canonical profile's fixed maximum Y is the upper *outer edge*
+        # of row zero.  Pixel-is-area rows therefore use the direct distance
+        # from that edge.  Retain the historic centre-aligned expression for
+        # ordinary databases so this opt-in profile cannot alter their stored
+        # indices.
+        y_offset = 0 if self.storageconfig.usgs_albers else 1
         assign_y = pdal.Filter.assign(
             value=f'yi = (({self.storageconfig.root.maxy} - Y) / '
-            f'{resolution}) - 1'
+            f'{resolution}) - {y_offset}'
         )
 
         stages.append(ferry)
