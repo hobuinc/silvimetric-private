@@ -231,13 +231,13 @@ def scan_cmd(
 @click.option(
     '--bounds',
     type=BoundsParamType(),
-    required=True,
+    required=False,
     help='Root bounds that encapsulates all data',
 )
 @click.option(
     '--crs',
     type=CRSParamType(),
-    required=True,
+    required=False,
     help='Coordinate system of data',
 )
 @click.option(
@@ -269,6 +269,13 @@ def scan_cmd(
     default='AlignToCenter',
     help="Pixel alignment: 'AlignToCenter' or 'AlignToCorner'",
 )
+@click.option(
+    '--usgs_albers', '--usgs-albers',
+    'usgs_albers',
+    is_flag=True,
+    default=False,
+    help='Use the fixed pixel-is-area EPSG:5070+5703 CONUS grid profile.',
+)
 @click.pass_obj
 def initialize_cmd(
     app: ApplicationConfig,
@@ -279,9 +286,15 @@ def initialize_cmd(
     metrics: list[Metric],
     alignment: str,
     xsize: int,
-    ysize: int
+    ysize: int,
+    usgs_albers: bool,
 ):
     """Initialize silvimetrics DATABASE"""
+
+    if not usgs_albers and (bounds is None or crs is None):
+        raise click.UsageError(
+            '--bounds and --crs are required unless --usgs_albers is used'
+        )
 
     storageconfig = StorageConfig(
         tdb_dir=app.tdb_dir,
@@ -293,7 +306,8 @@ def initialize_cmd(
         resolution=resolution,
         alignment=alignment,
         xsize=xsize,
-        ysize=ysize
+        ysize=ysize,
+        usgs_albers=usgs_albers,
     )
     return initialize.initialize(storageconfig)
 
@@ -305,6 +319,16 @@ def initialize_cmd(
     type=BoundsParamType(),
     default=None,
     help='Bounds for data to include in processing',
+)
+@click.option(
+    '--usgs_albers', '--usgs-albers',
+    'usgs_albers',
+    is_flag=True,
+    default=False,
+    help=(
+        'Use a USGS-Albers-profile database and interpret --bounds as '
+        'EPSG:5070 target bounds.'
+    ),
 )
 @click.option(
     '--tilesize',
@@ -448,6 +472,7 @@ def shatter_cmd(
     app,
     pointcloud,
     bounds,
+    usgs_albers,
     report,
     tilesize,
     processing_strategy,
@@ -492,6 +517,7 @@ def shatter_cmd(
         log=app.log,
         filename=pointcloud,
         bounds=bounds,
+        usgs_albers=usgs_albers,
         tile_size=tilesize,
         processing_strategy=processing_strategy,
         read_group_size=read_group_size,

@@ -105,8 +105,11 @@ class Storage:
         if ctx is None:
             ctx = tiledb.default_ctx()
 
-        # adjust cell bounds if necessary
-        config.root.adjust_alignment(config.resolution, config.alignment)
+        # A profile root is already aligned to its fixed, non-zero USGS grid
+        # anchor.  Re-aligning it to zero would shift every global pixel by up
+        # to one cell for resolutions such as 20 m.
+        if not config.usgs_albers:
+            config.root.adjust_alignment(config.resolution, config.alignment)
 
         xi = floor(
             (config.root.maxx - config.root.minx) / float(config.resolution)

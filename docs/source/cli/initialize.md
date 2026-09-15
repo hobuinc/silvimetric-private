@@ -21,13 +21,17 @@ Usage: silvimetric [OPTIONS] initialize [OPTIONS]
 Initialize silvimetrics DATABASE
 
 Options:
---bounds BOUNDS         Root bounds that encapsulates all data  [required]
---crs CRS               Coordinate system of data  [required]
+--bounds BOUNDS         Root bounds that encapsulates all data
+--crs CRS               Coordinate system of data
 -a, --attributes ATTRS  List of attributes to include in Database
 -m, --metrics METRICS   List of metrics to include in Database
 --resolution FLOAT      Summary pixel resolution
 --help                  Show this message and exit.
 ```
+
+`--bounds` and `--crs` are required for a normal database.  The
+[`--usgs_albers`](../usgs_albers.md) profile is the exception: it fixes both
+values to the canonical CONUS grid and uses pixel-is-area alignment.
 
 ## Example
 

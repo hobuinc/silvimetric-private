@@ -26,7 +26,12 @@ class Extents(object):
         """Root bounding box of the database."""
 
         # adjust bounds so they're matching up with cell lines or cell centers
-        self.bounds.adjust_alignment(resolution, alignment)
+        self.bounds.adjust_alignment(
+            resolution,
+            alignment,
+            origin_x=root.minx,
+            origin_y=root.maxy,
+        )
         minx, miny, maxx, maxy = self.bounds.get()
 
         self.rangex = maxx - minx
@@ -253,6 +258,60 @@ class Extents(object):
             )
             for minx, maxx, miny, maxy in coords_list
         ]
+
+    def get_root_aligned_leaf_children(self, tile_size):
+        """Return only root-tile children that can intersect this extent.
+
+        ``get_leaf_children`` is intentionally local and is appropriate for
+        sub-dividing an ordinary work extent.  A canonical CONUS root would
+        make calling it on the root prohibitively large.  This method starts
+        and ends on the same root tile boundaries, but visits only the tile
+        range enclosing ``self``.
+        """
+        # Keep the historical behaviour for non-square ``xsize * ysize``
+        # configurations: it uses the integer square-root as a common side.
+        side = math.isqrt(int(tile_size))
+        if side < 1:
+            raise ValueError('tile_size must be positive')
+
+        start_x = (self.x1 // side) * side
+        stop_x = math.ceil(self.x2 / side) * side
+        start_y = (self.y1 // side) * side
+        stop_y = math.ceil(self.y2 / side) * side
+        children = []
+        for x1 in range(start_x, stop_x, side):
+            for y1 in range(start_y, stop_y, side):
+                x2 = min(x1 + side, self.x2)
+                y2 = min(y1 + side, self.y2)
+                # Do not construct an out-of-domain child at an outer edge.
+                x2 = min(
+                    x2,
+                    math.ceil(
+                        (self.root.maxx - self.root.minx) / self.resolution
+                    ),
+                )
+                y2 = min(
+                    y2,
+                    math.ceil(
+                        (self.root.maxy - self.root.miny) / self.resolution
+                    ),
+                )
+                if x1 >= x2 or y1 >= y2:
+                    continue
+                children.append(
+                    Extents(
+                        Bounds(
+                            self.root.minx + x1 * self.resolution,
+                            self.root.maxy - y2 * self.resolution,
+                            self.root.minx + x2 * self.resolution,
+                            self.root.maxy - y1 * self.resolution,
+                        ),
+                        self.resolution,
+                        self.alignment,
+                        self.root,
+                    )
+                )
+        return children
 
     def get_overlap(self, other: Self) -> Self:
         bounds = Bounds.shared_bounds(self.bounds, other.bounds)

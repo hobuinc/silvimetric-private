@@ -9,9 +9,11 @@ from typing import Optional
 import tiledb
 import pdal
 import numpy as np
+import pyproj
 
 from .bounds import Bounds
 from .config import StorageConfig
+from .usgs_albers import USGS_ALBERS_CRS, USGS_ALBERS_HORIZONTAL_CRS
 
 
 class Data:
@@ -32,7 +34,7 @@ class Data:
         # object owned by a caller's ShatterConfig: a resumable build must see
         # identical user inputs when a fresh driver reconstructs its ledger.
         self.bounds = copy.deepcopy(bounds)
-        """Bounds of this section of data"""
+        """Target/output bounds of this section of data."""
 
         if reader_collar is not None and reader_collar < 0:
             raise ValueError('reader_collar must be non-negative')
@@ -56,14 +58,43 @@ class Data:
         self.reader = self.get_reader()
         """PDAL reader"""
 
-        if self.bounds is None:
-            self.bounds = Data.get_bounds(self.reader)
-
-        # adjust bounds if necessary
-        self.bounds.adjust_alignment(
-            storageconfig.resolution, storageconfig.alignment
+        self.source_crs = (
+            self.get_crs(self.reader) if storageconfig.usgs_albers else None
         )
+        """Source CRS used to transform canonical-profile reader bounds."""
+
+        if storageconfig.usgs_albers:
+            # Profile bounds are always in the target grid.  This lets a
+            # caller select the same pixel-space rectangle in independently
+            # built databases, while the reader query below is transformed
+            # back to its native source CRS for hierarchy pruning.
+            if self.bounds is None:
+                self.bounds = self._transform_bounds(
+                    Data.get_bounds(self.reader),
+                    self.source_crs,
+                    USGS_ALBERS_HORIZONTAL_CRS,
+                )
+            self.bounds.adjust_alignment(
+                storageconfig.resolution,
+                storageconfig.alignment,
+                origin_x=storageconfig.root.minx,
+                origin_y=storageconfig.root.maxy,
+            )
+        else:
+            if self.bounds is None:
+                self.bounds = Data.get_bounds(self.reader)
+            self.bounds.adjust_alignment(
+                storageconfig.resolution, storageconfig.alignment
+            )
+
         self.bounds = Bounds.shared_bounds(self.bounds, storageconfig.root)
+        # Preserve the long-standing normal-database behaviour: an input
+        # outside the configured root is still readable (and will ultimately
+        # contribute no in-root cells).  A canonical profile must fail early,
+        # because a missing overlap would otherwise make its target CRS and
+        # pixel-space contract ambiguous.
+        if self.bounds is None and storageconfig.usgs_albers:
+            raise ValueError('Input bounds do not overlap the storage root')
 
         self.pipeline = self.get_pipeline()
 
@@ -76,6 +107,8 @@ class Data:
             pipeline=json.loads(self.pipeline.pipeline),
             is_pipeline=self.is_pipeline(),
         )
+        if self.source_crs is not None:
+            j['source_crs'] = self.source_crs.to_wkt()
         return j
 
     def __repr__(self):
@@ -107,7 +140,7 @@ class Data:
         reader._options['threads'] = self.reader_thread_count
         self._apply_ept_options(reader)
         if self.bounds:
-            reader._options['bounds'] = str(self.bounds)
+            reader._options['bounds'] = str(self._reader_bounds(self.bounds))
 
         return reader.pipeline()
 
@@ -159,12 +192,7 @@ class Data:
                         if self.reader_collar is not None
                         else self.storageconfig.resolution
                     )
-                    collar = Bounds(
-                        self.bounds.minx - res,
-                        self.bounds.miny - res,
-                        self.bounds.maxx + res,
-                        self.bounds.maxy + res,
-                    )
+                    collar = self._reader_bounds(self.bounds, collar=res)
                     self._apply_query_options(stage, collar)
 
             # We strip off any writers from the pipeline that were
@@ -176,8 +204,16 @@ class Data:
         # that aren't simply a line.
         if len(readers) != 1:
             raise Exception(
-                    f'Pipelines can only have one reader of type {allowed_readers}'
+                f'Pipelines can only have one reader of type {allowed_readers}'
             )
+
+        if self.storageconfig.usgs_albers:
+            # Reprojection belongs after caller-provided source filters and
+            # after the native-CRS reader constraint, but before the output
+            # pixel coordinate assignment.  Crop in target CRS after the
+            # source collar has given upstream filters their edge context.
+            stages.append(pdal.Filter.reprojection(out_srs=USGS_ALBERS_CRS))
+            stages.append(pdal.Filter.crop(bounds=str(self.bounds)))
 
         resolution = self.storageconfig.resolution
         # Add xi and yi, only need this for PDAL < 2.6
@@ -332,6 +368,76 @@ class Data:
         qi = p.quickinfo[reader.type]
         return Bounds.from_string(json.dumps(qi['bounds']))
 
+    @staticmethod
+    def get_crs(reader: pdal.Reader) -> pyproj.CRS:
+        """Return the source reader's CRS, rejecting unreferenced inputs."""
+        qi = reader.pipeline().quickinfo[reader.type]
+        srs = qi.get('srs')
+        if isinstance(srs, dict):
+            # PDAL exposes both a horizontal WKT and a compound WKT.  Retain
+            # vertical provenance when available; pyproj derives a 2-D view
+            # for the bounds transform below.
+            srs = (
+                srs.get('compoundwkt')
+                or srs.get('wkt')
+                or srs.get('horizontal')
+            )
+        if not srs:
+            raise ValueError('The input reader does not advertise a CRS')
+        return pyproj.CRS.from_user_input(srs)
+
+    @staticmethod
+    def _horizontal_crs(crs: pyproj.CRS) -> pyproj.CRS:
+        """Return the horizontal component accepted by ``transform_bounds``."""
+        return crs.to_2d() if crs.is_compound else crs
+
+    @classmethod
+    def _transform_bounds(
+        cls,
+        bounds: Bounds,
+        source_crs: pyproj.CRS,
+        target_crs: pyproj.CRS,
+    ) -> Bounds:
+        """Densify and transform a rectangular extent between CRS spaces."""
+        transformer = pyproj.Transformer.from_crs(
+            cls._horizontal_crs(source_crs),
+            cls._horizontal_crs(target_crs),
+            always_xy=True,
+        )
+        values = transformer.transform_bounds(
+            bounds.minx,
+            bounds.miny,
+            bounds.maxx,
+            bounds.maxy,
+            densify_pts=21,
+        )
+        return Bounds(*values)
+
+    def _reader_bounds(
+        self, target_bounds: Bounds, collar: float = 0.0
+    ) -> Bounds:
+        """Convert target-grid bounds and a target-unit collar to reader CRS."""
+        if collar < 0:
+            raise ValueError('reader collar must be non-negative')
+        if not self.storageconfig.usgs_albers:
+            return Bounds(
+                target_bounds.minx - collar,
+                target_bounds.miny - collar,
+                target_bounds.maxx + collar,
+                target_bounds.maxy + collar,
+            )
+        expanded = Bounds(
+            target_bounds.minx - collar,
+            target_bounds.miny - collar,
+            target_bounds.maxx + collar,
+            target_bounds.maxy + collar,
+        )
+        return self._transform_bounds(
+            expanded,
+            USGS_ALBERS_HORIZONTAL_CRS,
+            self.source_crs,
+        )
+
     def estimate_count(
         self, bounds: Bounds, reader_resolution: Optional[float] = None
     ) -> int:
@@ -349,7 +455,11 @@ class Data:
         if reader_resolution is not None:
             if reader_resolution <= 0:
                 raise ValueError('reader_resolution must be positive')
-        self._apply_query_options(reader, bounds, reader_resolution)
+        self._apply_query_options(
+            reader,
+            self._reader_bounds(bounds) if bounds is not None else None,
+            reader_resolution,
+        )
 
         pipeline = reader.pipeline()
         if reader_resolution is None:
@@ -377,7 +487,10 @@ class Data:
         """
 
         reader = copy.deepcopy(self.get_reader())
-        self._apply_query_options(reader, bounds)
+        self._apply_query_options(
+            reader,
+            self._reader_bounds(bounds) if bounds is not None else None,
+        )
 
         pipeline = reader.pipeline()
         pipeline.execute()

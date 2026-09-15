@@ -1,5 +1,6 @@
 import json
 import ast
+import math
 
 
 # TODO should these bounds have a buffer?
@@ -136,8 +137,43 @@ class Bounds(dict):  # for JSON serializing
             return True
         return False
 
-    def adjust_alignment(self, resolution, alignment):
+    def adjust_alignment(
+        self,
+        resolution,
+        alignment,
+        *,
+        origin_x: float | None = None,
+        origin_y: float | None = None,
+    ):
+        """Expand to complete pixels.
+
+        ``origin_x``/``origin_y`` identify the upper-left outer pixel edge of
+        a canonical grid.  The historical zero-origin behaviour remains the
+        default.  An explicit origin is essential for a shared grid whose
+        anchor is not an even multiple of its resolution.
+        """
         if alignment.lower() in ["pixelisarea", "aligntocorner"]:
+            if origin_x is not None or origin_y is not None:
+                if origin_x is None or origin_y is None:
+                    raise ValueError('Both alignment origins must be supplied')
+
+                def snap_floor(value, origin):
+                    return origin + math.floor((value - origin) / resolution) * resolution
+
+                def snap_ceil(value, origin):
+                    return origin + math.ceil((value - origin) / resolution) * resolution
+
+                self.minx = snap_floor(self.minx, origin_x)
+                self.maxx = snap_ceil(self.maxx, origin_x)
+                # Rows run downward from the fixed top edge.  ``miny`` is the
+                # lower outer edge and ``maxy`` is the upper outer edge.
+                self.miny = origin_y - math.ceil(
+                    (origin_y - self.miny) / resolution
+                ) * resolution
+                self.maxy = origin_y - math.floor(
+                    (origin_y - self.maxy) / resolution
+                ) * resolution
+                return
             xmindif = self.minx % resolution
             xmaxdif = self.maxx % resolution
             ymaxdif = self.maxy % resolution

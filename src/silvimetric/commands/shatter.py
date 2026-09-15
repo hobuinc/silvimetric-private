@@ -2463,6 +2463,11 @@ def shatter(config: ShatterConfig) -> int:
 
     # set up tiledb
     storage = Storage.from_db(config.tdb_dir)
+    if config.usgs_albers != storage.config.usgs_albers:
+        raise ValueError(
+            '--usgs_albers must be used exactly when the destination was '
+            'initialized with the USGS Albers grid profile'
+        )
     data = Data(config.filename, storage.config, config.bounds)
     extents = Extents.from_sub(config.tdb_dir, data.bounds)
     # Persist the normalized planning bounds on this run's configuration.
@@ -2519,20 +2524,11 @@ def shatter(config: ShatterConfig) -> int:
         storage.save_shatter_meta(config)
 
     leaf_size = storage.config.ysize * storage.config.xsize
-    root_ext = Extents(
-        bounds=extents.root,
-        resolution=extents.resolution,
-        alignment=extents.alignment,
-        root=extents.root,
-    )
-    # get leaves reflecting TileDB tile bounds
-    potential_leaves = root_ext.get_leaf_children(leaf_size)
-    # filter by tiles that overlap, and get the overlapping extent
-    filtered_leaves = [
-        leaf
-        for leaf in potential_leaves if not extents.disjoint(leaf)
-    ]
-    tiled_leaves = [extents.get_overlap(leaf) for leaf in filtered_leaves]
+    # Enumerate only the root-aligned physical tiles around the input extent.
+    # This is equivalent to the historical root-then-filter algorithm for a
+    # local root, but it is what makes a full canonical CONUS root practical.
+    potential_leaves = extents.get_root_aligned_leaf_children(leaf_size)
+    tiled_leaves = [extents.get_overlap(leaf) for leaf in potential_leaves]
     full_count = len(tiled_leaves)
     if config.processing_strategy in {
         'macro-v3-stage-push',

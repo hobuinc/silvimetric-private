@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from .log import Log
 from .extents import Bounds
+from .usgs_albers import USGS_ALBERS_CONUS_BOUNDS, USGS_ALBERS_CRS
 from .metric import Metric
 from .metrics import grid_metrics
 from .attribute import Attribute, Attributes
@@ -82,6 +83,8 @@ class StorageConfig(Config):
     """TileDB X Tile size for IO operations."""
     ysize: int = field(default=1000)
     """TileDB Y Tile size for IO operations."""
+    usgs_albers: bool = field(default=False)
+    """Use the canonical, pixel-is-area USGS CONUS Albers grid profile."""
 
     attrs: list[Attribute] = field(
         default_factory=lambda: [
@@ -106,6 +109,15 @@ class StorageConfig(Config):
     use., defaults to 1"""
 
     def __post_init__(self) -> None:
+        if self.usgs_albers:
+            # A profile database deliberately owns both of these values.  A
+            # full common root makes its local TileDB indices globally stable
+            # across databases; it does not cause shatter to plan empty CONUS
+            # tiles (see the bounded leaf planner in ``shatter``).
+            self.crs = pyproj.CRS.from_user_input(USGS_ALBERS_CRS)
+            self.root = Bounds(*USGS_ALBERS_CONUS_BOUNDS.get())
+            self.alignment = 'PixelIsArea'
+
         crs = self.crs
         if isinstance(crs, dict):
             crs = json.loads(crs)
@@ -200,6 +212,7 @@ class StorageConfig(Config):
             next_time_slot=x['next_time_slot'],
             xsize=x['xsize'],
             ysize=x['ysize'],
+            usgs_albers=x.get('usgs_albers', False),
         )
 
         return n
@@ -264,6 +277,8 @@ class ShatterConfig(Config):
     """A date range representing data collection times."""
     bounds: Union[Bounds, None] = field(default=None)
     """The bounding box of the shatter process., defaults to None"""
+    usgs_albers: bool = field(default=False)
+    """Require and use the canonical USGS Albers storage-grid profile."""
     name: uuid.UUID = field(default=uuid.uuid4())
     """UUID representing this shatter process and will be generated if not
     provided., defaults to uuid.uuid()"""
@@ -530,6 +545,7 @@ class ShatterConfig(Config):
             name=str(self.name),
             time_slot=self.time_slot,
             bounds=self.bounds.to_json(),
+            usgs_albers=self.usgs_albers,
             date=date,
             processing_strategy=self.processing_strategy,
             tile_size=self.tile_size,
@@ -610,6 +626,7 @@ class ShatterConfig(Config):
             debug=x['debug'],
             name=uuid.UUID(x['name']),
             bounds=Bounds(*x['bounds']),
+            usgs_albers=x.get('usgs_albers', False),
             tile_size=x['tile_size'],
             processing_strategy=x.get('processing_strategy', 'leaf-v1'),
             read_group_size=x.get('read_group_size'),

@@ -76,6 +76,22 @@
 - `StorageConfig` automatically retains point attributes required by metric
   dependencies (including direct Attribute dependencies and RGB/NIR inputs).
 
+## Canonical USGS Albers profile
+
+- `initialize --usgs_albers` establishes a full-CONUS, pixel-is-area grid in
+  `EPSG:5070+5703`.  Its fixed upper-left *outer pixel edge* is
+  `(-2493045, 3310005)` and every profile database retains the same root.
+- `shatter --usgs_albers` is required for profile databases and rejected for
+  ordinary databases.  Its optional bounds are target EPSG:5070 bounds; the
+  reader query is transformed to the source CRS, then PDAL reprojects and
+  crops before Silvimetric calculates global pixel indices.
+- Never enumerate profile root tiles.  Use
+  `Extents.get_root_aligned_leaf_children()` so scheduling remains bounded to
+  the input footprint while preserving physical TileDB tile boundaries.
+- `tests/test_usgs_albers.py` covers the profile contract, reprojection,
+  TileDB/GDAL pixel-is-area metadata, history serialization, CLI initialization,
+  and equal cross-database target-grid selections.
+
 ## Macro-v4 canonical-array proof
 
 - `macro-v4-single-array` is an intentionally separate proof path. It writes
