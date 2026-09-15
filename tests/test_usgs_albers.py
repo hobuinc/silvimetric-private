@@ -231,3 +231,31 @@ def test_cli_initializes_profile_without_user_bounds_or_crs(runner, tmp_path):
     config = Storage.from_db(str(database)).config
     assert config.usgs_albers
     assert config.root == USGS_ALBERS_CONUS_BOUNDS
+
+
+def test_cli_shatter_reprojects_into_profile(
+    runner, autzen_filepath, tmp_path
+):
+    database = tmp_path / 'profile.tdb'
+    Storage.create(_profile_config(database))
+    result = runner.invoke(
+        cli.cli,
+        [
+            '-d',
+            str(database),
+            '--scheduler',
+            'single-threaded',
+            'shatter',
+            autzen_filepath,
+            '--usgs_albers',
+            '--bounds',
+            str(WINDOW_A),
+            '--date',
+            '2020-01-01',
+            '--tilesize',
+            '64',
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert Storage.from_db(str(database)).get_history()[-1]['usgs_albers']
