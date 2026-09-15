@@ -404,20 +404,79 @@ class Data:
         source_crs: pyproj.CRS,
         target_crs: pyproj.CRS,
     ) -> Bounds:
-        """Densify and transform a rectangular extent between CRS spaces."""
-        transformer = pyproj.Transformer.from_crs(
-            cls._horizontal_crs(source_crs),
-            cls._horizontal_crs(target_crs),
-            always_xy=True,
+        """Densify and transform a rectangular extent between CRS spaces.
+
+        ``pyproj`` is normally the fastest and most direct route.  In the
+        Linux/aarch64 Dask-worker environment, however, PROJ can occasionally
+        be initialized in an unusable state and return four infinities rather
+        than raising.  Do not hand that malformed extent to PDAL: use GDAL's
+        independently initialized OSR transform as a bounded fallback.
+        """
+        source = cls._horizontal_crs(source_crs)
+        target = cls._horizontal_crs(target_crs)
+        try:
+            values = pyproj.Transformer.from_crs(
+                source, target, always_xy=True
+            ).transform_bounds(
+                bounds.minx,
+                bounds.miny,
+                bounds.maxx,
+                bounds.maxy,
+                densify_pts=21,
+            )
+        except pyproj.exceptions.ProjError:
+            values = None
+        if values is not None and np.isfinite(values).all():
+            return Bounds(*values)
+        return cls._transform_bounds_osr(bounds, source, target)
+
+    @staticmethod
+    def _transform_bounds_osr(
+        bounds: Bounds, source_crs: pyproj.CRS, target_crs: pyproj.CRS
+    ) -> Bounds:
+        """Transform sampled rectangle edges with GDAL/OSR as a safe fallback."""
+        from osgeo import osr
+
+        osr.UseExceptions()
+        source = osr.SpatialReference()
+        source.ImportFromWkt(source_crs.to_wkt())
+        target = osr.SpatialReference()
+        target.ImportFromWkt(target_crs.to_wkt())
+        # Both pyproj's normal path and Silvimetric's point dimensions use
+        # traditional X/Y order.  Make that order explicit under GDAL 3+.
+        if hasattr(osr, 'OAMS_TRADITIONAL_GIS_ORDER'):
+            source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        transform = osr.CoordinateTransformation(source, target)
+        samples = np.linspace(0.0, 1.0, 22)
+        points = [
+            (bounds.minx + (bounds.maxx - bounds.minx) * fraction, bounds.miny)
+            for fraction in samples
+        ]
+        points.extend(
+            (bounds.minx + (bounds.maxx - bounds.minx) * fraction, bounds.maxy)
+            for fraction in samples
         )
-        values = transformer.transform_bounds(
-            bounds.minx,
-            bounds.miny,
-            bounds.maxx,
-            bounds.maxy,
-            densify_pts=21,
+        points.extend(
+            (bounds.minx, bounds.miny + (bounds.maxy - bounds.miny) * fraction)
+            for fraction in samples
         )
-        return Bounds(*values)
+        points.extend(
+            (bounds.maxx, bounds.miny + (bounds.maxy - bounds.miny) * fraction)
+            for fraction in samples
+        )
+        transformed = np.asarray(transform.TransformPoints(points), dtype=float)
+        if transformed.size == 0 or not np.isfinite(transformed[:, :2]).all():
+            raise ValueError(
+                'Unable to transform finite bounds between '
+                f'{source_crs.to_string()} and {target_crs.to_string()}'
+            )
+        return Bounds(
+            transformed[:, 0].min(),
+            transformed[:, 1].min(),
+            transformed[:, 0].max(),
+            transformed[:, 1].max(),
+        )
 
     def _reader_bounds(
         self, target_bounds: Bounds, collar: float = 0.0

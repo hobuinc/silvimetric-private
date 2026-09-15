@@ -124,6 +124,34 @@ def test_profile_reprojects_source_and_keeps_origin_based_pixel_indices(
     assert np.all(np.floor(output['yi'][:128]) >= 0)
 
 
+def test_profile_falls_back_when_pyproj_returns_nonfinite_bounds(monkeypatch):
+    """A Dask worker must never hand PDAL ``[inf, inf, inf, inf]`` bounds.
+
+    Linux/aarch64 workers have demonstrated a PROJ initialization-order issue
+    where ``transform_bounds`` returns infinities instead of raising.  The
+    fallback uses GDAL/OSR and retains the required traditional X/Y ordering.
+    """
+
+    class NonfiniteTransformer:
+        def transform_bounds(self, *args, **kwargs):
+            return (np.inf, np.inf, np.inf, np.inf)
+
+    monkeypatch.setattr(
+        pyproj.Transformer,
+        'from_crs',
+        lambda *args, **kwargs: NonfiniteTransformer(),
+    )
+    transformed = Data._transform_bounds(
+        Bounds(19_735, 2_660_745, 20_295, 2_661_045),
+        USGS_ALBERS_HORIZONTAL_CRS,
+        pyproj.CRS.from_epsg(3857),
+    )
+    assert np.isfinite(transformed.get()).all()
+    assert transformed.minx < -10_657_000
+    assert transformed.maxx > -10_658_000
+    assert transformed.miny < transformed.maxy
+
+
 def test_profile_cross_database_selection_has_identical_pixel_space(
     autzen_filepath, tmp_path
 ):
