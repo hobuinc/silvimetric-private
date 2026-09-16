@@ -2088,6 +2088,7 @@ def finalize_macro_v4_staged_build(
     the original shatter configuration. The finalizer therefore does not
     reopen the source EPT resource or re-plan work units.
     """
+    finalization_started = perf_counter()
     storage = Storage.from_db(tdb_dir)
     ledger = BuildLedger(build_ledger_uri, Storage.get_tdb_context(storage))
     manifest = ledger.build_manifest()
@@ -2123,9 +2124,11 @@ def finalize_macro_v4_staged_build(
         )
     config.defer_build_finalization = False
     _seal_macro_v4_staged_build(config, storage, ledger)
-    config.execution_timing['shatter_total_seconds'] = round(
-        (datetime.now().timestamp() * 1000 - config.start_timestamp) / 1000,
-        6,
+    # Preserve the publish phase's ``shatter_total_seconds``. It measures
+    # source processing; including intentional worker-drain time here would
+    # make benchmark comparisons misleading.
+    config.execution_timing['scheduler_only_finalization_seconds'] = round(
+        perf_counter() - finalization_started, 6
     )
     final(config, storage, finished=True)
     return config
