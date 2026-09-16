@@ -337,6 +337,9 @@ class ShatterConfig(Config):
     """Maximum TileDB S3 VFS operations per canonical-array publisher."""
     build_stage_vfs_parallel_ops: int = field(default=4)
     """Maximum TileDB S3 VFS operations for one independent stage writer."""
+    defer_build_finalization: bool = field(default=False)
+    """Publish macro-v4 blocks now and leave canonical-array consolidation to
+    a later scheduler-only ``finalize_macro_v4_staged_build`` invocation."""
     start_timestamp: float = field(default=None)
     """The process start timestamp., defaults to None"""
     end_timestamp: float = field(default=None)
@@ -585,6 +588,7 @@ class ShatterConfig(Config):
             build_stage_vfs_parallel_ops=(
                 self.build_stage_vfs_parallel_ops
             ),
+            defer_build_finalization=self.defer_build_finalization,
             execution_timing=self.execution_timing,
         )
 
@@ -665,6 +669,7 @@ class ShatterConfig(Config):
             build_stage_vfs_parallel_ops=x.get(
                 'build_stage_vfs_parallel_ops', 4
             ),
+            defer_build_finalization=x.get('defer_build_finalization', False),
             execution_timing=x.get('execution_timing', {}),
             start_timestamp=x['start_timestamp'],
             end_timestamp=x['end_timestamp'],

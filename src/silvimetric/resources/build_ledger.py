@@ -119,6 +119,10 @@ class BuildLedger:
         """Persist an immutable state transition and return its receipt."""
         if state not in _STATE_ORDER and state not in {
             'build_started',
+            # All macro stages have been durably published to the canonical
+            # array.  A scheduler-only process may now perform expensive
+            # array maintenance without retaining the compute fleet.
+            'build_published',
             'build_consolidating',
             'build_sealed',
             'build_partial',

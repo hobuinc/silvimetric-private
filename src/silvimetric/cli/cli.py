@@ -445,6 +445,15 @@ def initialize_cmd(
     help='TileDB S3 operations allowed per independent stage writer.',
 )
 @click.option(
+    '--defer-build-finalization',
+    is_flag=True,
+    default=False,
+    help=(
+        'Publish macro-v4 blocks but defer canonical-array consolidation to '
+        'a scheduler-only finalization step.'
+    ),
+)
+@click.option(
     '--report',
     is_flag=True,
     default=False,
@@ -490,6 +499,7 @@ def shatter_cmd(
     build_min_cells_per_side,
     build_publish_vfs_parallel_ops,
     build_stage_vfs_parallel_ops,
+    defer_build_finalization,
     date,
     dates,
 ):
@@ -534,6 +544,7 @@ def shatter_cmd(
         build_min_cells_per_side=build_min_cells_per_side,
         build_publish_vfs_parallel_ops=build_publish_vfs_parallel_ops,
         build_stage_vfs_parallel_ops=build_stage_vfs_parallel_ops,
+        defer_build_finalization=defer_build_finalization,
     )
 
     if report:

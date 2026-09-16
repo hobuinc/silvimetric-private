@@ -743,6 +743,69 @@ class Test_Shatter(object):
         ].sum()
         assert int(point_count) == test_point_count
 
+    def test_macro_v4_staged_publish_defers_sealing_to_scheduler_only_step(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """Workers may disappear after publishing without blocking sealing."""
+        staged_dir = (tmp_path / 'macro-v4-deferred.tdb').as_posix()
+        stage_uri = (tmp_path / 'deferred-stage').as_posix()
+        ledger_uri = (tmp_path / 'deferred-ledger').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = staged_dir
+        Storage.create(staged_storage_config)
+        config = ShatterConfig(
+            name=uuid.uuid4(),
+            tdb_dir=staged_dir,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=stage_uri,
+            build_ledger_uri=ledger_uri,
+            build_publish_concurrency=2,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+            defer_build_finalization=True,
+        )
+        with LocalCluster(
+            n_workers=2,
+            threads_per_worker=1,
+            processes=False,
+            dashboard_address=None,
+        ) as cluster:
+            with Client(cluster):
+                assert shatter(config) == test_point_count
+
+        ledger = BuildLedger(ledger_uri)
+        assert ledger.state('__build__').state == 'build_published'
+        assert config.execution_timing['array']['finalization_deferred']
+        stored = Storage.from_db(staged_dir).get_shatter_meta(config.time_slot)
+        assert not stored.finished
+
+        # No LocalCluster or Dask client exists here. This proves that the
+        # expensive canonical maintenance phase depends only on the ledger and
+        # canonical array, not on workers, source EPT access, or PDAL.
+        finalized = shatter_module.finalize_macro_v4_staged_build(
+            staged_dir, ledger_uri, config.name
+        )
+        assert finalized.finished
+        assert finalized.point_count == test_point_count
+        assert ledger.state('__build__').state == 'build_sealed'
+        assert finalized.execution_timing['array']['fragment_count_before'] >= 1
+        point_count = Storage.from_db(staged_dir).open('r').df[:, :][
+            'count'
+        ].sum()
+        assert int(point_count) == test_point_count
+
     def test_macro_v4_staged_publish_recovers_after_publish_failure(
         self,
         shatter_config: ShatterConfig,

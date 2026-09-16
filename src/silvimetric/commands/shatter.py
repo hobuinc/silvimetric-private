@@ -1943,16 +1943,59 @@ def run_macro_staged_publish(
             'build name and ledger URI.'
         )
 
+    # This is the durable handoff between the horizontally scalable build
+    # phase and array maintenance. It is recorded only after every active leaf
+    # has a published receipt, so a scheduler-only finalizer never has to
+    # rediscover or execute point-cloud work.
+    published_build = {
+        'build_id': str(config.name),
+        'planned_block_count': len(active_block_ids),
+        'root_block_count': len(root_block_ids),
+        'published_block_count': len(published_records),
+        'point_count': config.point_count,
+    }
     prior_build_state = ledger.state('__build__')
-    if (
-        prior_build_state is not None
-        and prior_build_state.state == 'build_sealed'
-    ):
-        # A completed build may be inspected/restarted without replaying an
-        # expensive whole-array consolidation. Interrupted finalization never
-        # has this receipt and therefore naturally re-enters the maintenance
-        # path below.
+    if prior_build_state is None or prior_build_state.state != 'build_sealed':
+        ledger.append('__build__', 'build_published', **published_build)
+
+    if config.defer_build_finalization:
         timing['array'] = {
+            'fragment_target_mb': config.stage_fragment_size_mb,
+            'finalization_deferred': True,
+        }
+        config.execution_timing = timing
+        return config.point_count
+
+    config.execution_timing = timing
+    return _seal_macro_v4_staged_build(config, storage, ledger)
+
+
+def _latest_build_receipt(ledger: BuildLedger, state: str):
+    """Return the newest receipt for one build-level transition."""
+    receipts = [
+        receipt
+        for receipt in ledger.records('__build__')
+        if receipt.state == state
+    ]
+    return receipts[-1] if receipts else None
+
+
+def _seal_macro_v4_staged_build(
+    config: ShatterConfig, storage: Storage, ledger: BuildLedger
+) -> int:
+    """Consolidate a fully published staged macro-v4 array exactly once.
+
+    This function deliberately has no ``Data`` or Dask dependency. It is safe
+    to run after the point-processing workers have gone away, and an
+    interrupted maintenance attempt re-enters from the immutable published
+    receipt rather than physical fragment names.
+    """
+    prior_build_state = ledger.state('__build__')
+    if prior_build_state is not None and prior_build_state.state == 'build_sealed':
+        config.point_count = int(
+            prior_build_state.details.get('point_count', config.point_count)
+        )
+        config.execution_timing['array'] = {
             'fragment_target_mb': config.stage_fragment_size_mb,
             'fragment_count_after': prior_build_state.details.get(
                 'fragment_count'
@@ -1962,29 +2005,55 @@ def run_macro_staged_publish(
             ),
             'consolidation_skipped': True,
         }
-        config.execution_timing = timing
         return config.point_count
 
+    published = _latest_build_receipt(ledger, 'build_published')
+    if published is None:
+        raise RuntimeError(
+            'Cannot finalize this macro-v4 build because it has no durable '
+            'build_published receipt. Resume the build phase first.'
+        )
+    config.point_count = int(published.details['point_count'])
     fragments_before = storage.stage_fragment_summary()
     ledger.append(
         '__build__',
         'build_consolidating',
         build_id=str(config.name),
         fragment_count=len(fragments_before),
+        published_block_count=published.details['published_block_count'],
     )
     consolidation_started = perf_counter()
-    storage.consolidate_canonical_array(config.stage_fragment_size_mb)
-    storage.vacuum()
-    for mode in ['fragment_meta', 'commits', 'array_meta']:
-        storage.consolidate(mode)
-        storage.vacuum(mode)
-    fragments_after = storage.stage_fragment_summary()
+    try:
+        storage.consolidate_canonical_array(config.stage_fragment_size_mb)
+        storage.vacuum()
+        for mode in ['fragment_meta', 'commits', 'array_meta']:
+            storage.consolidate(mode)
+            storage.vacuum(mode)
+        fragments_after = storage.stage_fragment_summary()
+    except BaseException as error:
+        # The earlier build_published receipt remains the source of truth for
+        # a retry; this marker only identifies the failed phase for operators.
+        try:
+            ledger.append(
+                '__build__',
+                'build_partial',
+                build_id=str(config.name),
+                phase='finalization',
+                reason=type(error).__name__,
+                message=str(error),
+            )
+        except Exception:
+            config.log.exception(
+                'Unable to append macro-v4 finalization failure receipt'
+            )
+        raise
+
     seal = {
         'build_id': str(config.name),
         'build_state': 'sealed',
-        'planned_block_count': len(active_block_ids),
-        'root_block_count': len(root_block_ids),
-        'published_block_count': len(published_records),
+        'planned_block_count': published.details['planned_block_count'],
+        'root_block_count': published.details['root_block_count'],
+        'published_block_count': published.details['published_block_count'],
         'point_count': config.point_count,
         'fragment_count': len(fragments_after),
         'fragment_bytes': sum(fragment['bytes'] for fragment in fragments_after),
@@ -1993,7 +2062,7 @@ def run_macro_staged_publish(
     storage.save_metadata(
         f'macro_v4_build_{config.name}', json.dumps(seal, sort_keys=True)
     )
-    timing['array'] = {
+    config.execution_timing['array'] = {
         'fragment_target_mb': config.stage_fragment_size_mb,
         'fragment_count_before': len(fragments_before),
         'fragment_count_after': len(fragments_after),
@@ -2007,8 +2076,59 @@ def run_macro_staged_publish(
             perf_counter() - consolidation_started, 6
         ),
     }
-    config.execution_timing = timing
     return config.point_count
+
+
+def finalize_macro_v4_staged_build(
+    tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID
+) -> ShatterConfig:
+    """Seal a published macro-v4 build without a Dask or PDAL worker fleet.
+
+    Storage history and the immutable ledger manifest bind this operation to
+    the original shatter configuration. The finalizer therefore does not
+    reopen the source EPT resource or re-plan work units.
+    """
+    storage = Storage.from_db(tdb_dir)
+    ledger = BuildLedger(build_ledger_uri, Storage.get_tdb_context(storage))
+    manifest = ledger.build_manifest()
+    if manifest is None:
+        raise ValueError(
+            f'No macro-v4 build manifest exists at {build_ledger_uri!r}.'
+        )
+    expected_id = str(build_id)
+    if manifest.details.get('build_id') != expected_id:
+        raise ValueError(
+            'The requested build id does not match the ledger manifest: '
+            f'{expected_id!r} != {manifest.details.get("build_id")!r}.'
+        )
+    if manifest.details.get('canonical_uri', '').rstrip('/') != tdb_dir.rstrip('/'):
+        raise ValueError(
+            'The requested canonical array does not match the ledger manifest.'
+        )
+    time_slot = manifest.details.get('time_slot')
+    if time_slot is None:
+        raise ValueError(
+            'The build ledger predates scheduler-only finalization and has '
+            'no recoverable history time slot.'
+        )
+    config = storage.get_shatter_meta(int(time_slot))
+    if (
+        config.processing_strategy != 'macro-v4-staged-publish'
+        or str(config.name) != expected_id
+        or config.build_ledger_uri != build_ledger_uri
+    ):
+        raise ValueError(
+            'Canonical-array history does not match the requested macro-v4 '
+            'build finalization.'
+        )
+    config.defer_build_finalization = False
+    _seal_macro_v4_staged_build(config, storage, ledger)
+    config.execution_timing['shatter_total_seconds'] = round(
+        (datetime.now().timestamp() * 1000 - config.start_timestamp) / 1000,
+        6,
+    )
+    final(config, storage, finished=True)
+    return config
 
 
 def group_macro_blocks(
@@ -2609,6 +2729,16 @@ def shatter(config: ShatterConfig) -> int:
         )
 
     if config.processing_strategy != 'macro-v3-stage-push':
-        final(config, storage, finished=True)
+        # The publish phase is intentionally a durable but unfinished history
+        # entry. ``finalize_macro_v4_staged_build`` owns the finished marker
+        # once scheduler-only TileDB maintenance has sealed the array.
+        final(
+            config,
+            storage,
+            finished=not (
+                config.processing_strategy == 'macro-v4-staged-publish'
+                and config.defer_build_finalization
+            ),
+        )
     restore_signal_handlers()
     return config.point_count

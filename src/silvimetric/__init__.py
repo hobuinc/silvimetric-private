@@ -25,7 +25,7 @@ from .resources.config import (
     ApplicationConfig,
 )
 
-from .commands.shatter import shatter
+from .commands.shatter import shatter, finalize_macro_v4_staged_build
 from .commands.extract import extract
 from .commands.info import info
 from .commands.scan import scan
