@@ -143,6 +143,23 @@
 - `Storage.vacuum()` and the generic `Storage.consolidate()` must retain the
   `Storage.get_tdb_context()` settings. A fresh TileDB context loses the
   S3-region/profile configuration and leaves superseded S3 objects behind.
+- The staged planner retains its source-wide calibration as a conservative
+  floor and also records a spatial local-density map. It takes one 50 m
+  native-resolution sample per candidate by default, propagates intersecting
+  high-density observations into children, and records the map in planner
+  timing. Do not raise the local sample side casually: its purpose is to find
+  local flightline/overlap density without turning planning into a second
+  source-data pass.
+- Memory recovery is fail-fast by default: `build_stage_retries=0` lets the
+  first memory-pressure or `KilledWorker` result create deterministic child
+  receipts. The EC2 template configures Dask `allowed-failures=1` and records
+  it in the execution context. Override either only when there is evidence of
+  transient infrastructure loss rather than memory pressure.
+- The Dask executor streams independent stage and canonical-publish queues.
+  It keeps stages bounded by available worker threads, limits the canonical
+  array to `build_publish_concurrency` writers (four by default), and puts
+  split children before untouched root work. Do not reintroduce a synchronous
+  wait on a full publisher pool; it recreates the stage/publish backlog.
 
 ## Validation used for this state
 
