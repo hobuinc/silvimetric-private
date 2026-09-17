@@ -284,6 +284,80 @@ class Test_Shatter(object):
             for window in planner['windows']
         )
 
+    def test_adaptive_planner_uses_local_density_before_worker_recovery(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+    ):
+        """A dense central flightline must not inherit sparse AOI samples.
+
+        The whole-AOI calibration samples a 2-by-2 grid.  This fixture puts a
+        dense area between those four locations, where the old planner would
+        submit one oversized task and learn only after a killed worker.  The
+        per-block sample sees that density before Dask work is created.
+        """
+
+        class LocalizedDensityData:
+            def estimate_count(self, bounds, reader_resolution=None):
+                area = (bounds.maxx - bounds.minx) * (
+                    bounds.maxy - bounds.miny
+                )
+                return max(1, int(area / 160**2))
+
+            def count(self, bounds):
+                center_x = (bounds.minx + bounds.maxx) / 2
+                center_y = (bounds.miny + bounds.maxy) / 2
+                density = 100 if 600 <= center_x <= 1000 and 600 <= center_y <= 1000 else 1
+                area = (bounds.maxx - bounds.minx) * (
+                    bounds.maxy - bounds.miny
+                )
+                return int(area * density)
+
+        shatter_config.tile_size = 1
+        shatter_config.read_group_size = 4
+        shatter_config.processing_strategy = 'macro-v4-staged-publish'
+        shatter_config.build_stage_uri = '/private/tmp/local-density-stages'
+        shatter_config.build_ledger_uri = '/private/tmp/local-density-ledger'
+        shatter_config.stage_shard_target_points = 25_000_000
+        shatter_config.stage_planner_resolution_multiple = 8
+        shatter_config.stage_planner_calibration_sample_count = 4
+        shatter_config.stage_planner_local_calibration_sample_count = 1
+        shatter_config.build_max_split_depth = 8
+        shatter_config.build_min_cells_per_side = 1
+        root = Bounds(0, 0, 1600, 1600)
+        singleton = [
+            Extents(
+                root,
+                storage.config.resolution,
+                storage.config.alignment,
+                root,
+            )
+        ]
+
+        blocks, planner = plan_macro_blocks(
+            singleton, shatter_config, storage, LocalizedDensityData()
+        )
+
+        assert len(blocks) > 1
+        assert planner['local_calibration_sample_count'] == 1
+        assert any(
+            sample['raw_density_points_per_m2']
+            > planner['density_ceiling_points_per_m2']
+            for sample in planner['local_calibration_map']
+        )
+        assert any(
+            window['inherited_local_density_observations'] > 0
+            for window in planner['windows']
+        )
+        assert all(
+            sample['area_m2'] <= 50.0**2
+            for sample in planner['local_calibration_map']
+        )
+        assert all(
+            window['estimated_max_points'] <= 25_000_000
+            for window in planner['windows']
+        )
+
     def test_adaptive_macro_v3_planner_does_not_treat_cells_as_raw_points(
         self,
         shatter_config: ShatterConfig,
@@ -983,6 +1057,8 @@ class Test_Shatter(object):
         assert executor['mode'] == 'durable-stages-bounded-canonical-publishers'
         assert executor['stage_task_count'] >= 2
         assert executor['publisher_concurrency'] == 2
+        assert executor['stage_inflight_limit'] == 2
+        assert executor['max_pending_publish_blocks'] >= 0
         assert executor['publish_retries'] == 0
         point_count = Storage.from_db(staged_dir).open('r').df[:, :][
             'count'

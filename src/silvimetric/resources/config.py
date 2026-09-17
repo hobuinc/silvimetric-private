@@ -316,6 +316,21 @@ class ShatterConfig(Config):
     """Number of bounded native-resolution reads used to calibrate a shard plan."""
     stage_planner_calibration_window_m: float = field(default=250.0)
     """Side length, in CRS units, of each bounded native-resolution sample."""
+    stage_planner_local_calibration_sample_count: int = field(default=1)
+    """Native-resolution density samples taken inside every planned block.
+
+    A whole-AOI calibration establishes a conservative source-wide floor, but
+    it cannot see a dense flightline or overlap concentrated in one macro.
+    These small local samples make the pre-stage point estimate spatially
+    aware, so those macros are split before an expensive worker-memory kill.
+    """
+    stage_planner_local_calibration_window_m: float = field(default=50.0)
+    """Side length, in CRS units, of a per-candidate density sample.
+
+    This is intentionally smaller than the whole-AOI calibration window:
+    hundreds of local samples must remain a lightweight planning overhead,
+    rather than a second source-data processing pass.
+    """
     stage_planner_density_safety_factor: float = field(default=1.25)
     """Inflation applied to measured source density before shard splitting."""
     stage_worker_address: Union[str, None] = field(default=None)
@@ -326,8 +341,13 @@ class ShatterConfig(Config):
     """Durable URI for append-only macro-v4 build receipts."""
     build_publish_concurrency: int = field(default=4)
     """Maximum concurrent writers allowed to commit the canonical array."""
-    build_stage_retries: int = field(default=2)
-    """Safe Dask retries; every attempt receives a new stage URI."""
+    build_stage_retries: int = field(default=0)
+    """Dask retries for one immutable macro-v4 stage task.
+
+    Memory-limited tasks must be split after their first failed execution;
+    retries are appropriate only when a caller has evidence of transient
+    infrastructure loss.
+    """
     build_max_split_depth: int = field(default=8)
     """Maximum adaptive spatial subdivisions for one failed macro-v4 block."""
     build_min_cells_per_side: Union[int, None] = field(default=None)
@@ -519,6 +539,16 @@ class ShatterConfig(Config):
                     raise ValueError(f'{field_name} must be positive')
             if self.build_stage_retries < 0:
                 raise ValueError('build_stage_retries must not be negative')
+            if self.stage_planner_local_calibration_sample_count < 1:
+                raise ValueError(
+                    'stage_planner_local_calibration_sample_count must be '
+                    'positive'
+                )
+            if self.stage_planner_local_calibration_window_m <= 0:
+                raise ValueError(
+                    'stage_planner_local_calibration_window_m must be '
+                    'positive'
+                )
             if (
                 self.build_min_cells_per_side is not None
                 and self.build_min_cells_per_side < 1
@@ -571,6 +601,12 @@ class ShatterConfig(Config):
             ),
             stage_planner_calibration_window_m=(
                 self.stage_planner_calibration_window_m
+            ),
+            stage_planner_local_calibration_sample_count=(
+                self.stage_planner_local_calibration_sample_count
+            ),
+            stage_planner_local_calibration_window_m=(
+                self.stage_planner_local_calibration_window_m
             ),
             stage_planner_density_safety_factor=(
                 self.stage_planner_density_safety_factor
@@ -653,6 +689,12 @@ class ShatterConfig(Config):
             stage_planner_calibration_window_m=x.get(
                 'stage_planner_calibration_window_m', 250.0
             ),
+            stage_planner_local_calibration_sample_count=x.get(
+                'stage_planner_local_calibration_sample_count', 1
+            ),
+            stage_planner_local_calibration_window_m=x.get(
+                'stage_planner_local_calibration_window_m', 50.0
+            ),
             stage_planner_density_safety_factor=x.get(
                 'stage_planner_density_safety_factor', 1.25
             ),
@@ -660,7 +702,7 @@ class ShatterConfig(Config):
             build_stage_uri=x.get('build_stage_uri'),
             build_ledger_uri=x.get('build_ledger_uri'),
             build_publish_concurrency=x.get('build_publish_concurrency', 4),
-            build_stage_retries=x.get('build_stage_retries', 2),
+            build_stage_retries=x.get('build_stage_retries', 0),
             build_max_split_depth=x.get('build_max_split_depth', 8),
             build_min_cells_per_side=x.get('build_min_cells_per_side'),
             build_publish_vfs_parallel_ops=x.get(

@@ -7,6 +7,7 @@ import os
 import resource
 import sys
 import uuid
+from collections import deque
 from threading import Event, Thread
 from datetime import datetime
 import copy
@@ -1725,44 +1726,40 @@ def run_macro_staged_publish(
     adaptive_splits = []
     dc = get_client()
 
-    def publish_one(block_id: str, active, stream) -> None:
-        while len(active) >= config.build_publish_concurrency:
-            future, result = next(stream)
-            active.discard(future)
-            if future.status != 'finished':
-                failures.append((future, result))
-            else:
-                published_results.append(result)
-        future = dc.submit(
-            publish_staged_macro_block,
-            block_id=block_id,
-            config=config,
-            ledger_uri=config.build_ledger_uri,
-            retries=0,
-        )
-        active.add(future)
-        stream.add(future)
-
     if dc is not None:
-        if not dc.scheduler_info()['workers']:
+        workers = dc.scheduler_info()['workers']
+        if not workers:
             raise RuntimeError(
                 'macro-v4-staged-publish requires at least one Dask worker'
             )
-        publish_stream = as_completed([], with_results=True, raise_errors=False)
-        active_publishes = set()
+        # Keep stages and canonical publishes on one event stream.  The
+        # previous executor synchronously waited on a publisher whenever its
+        # small pool was full.  A slow canonical write then blocked stage
+        # receipt handling and deferred split children until the entire stage
+        # generation had drained.
+        completion_stream = as_completed(
+            [], with_results=True, raise_errors=False
+        )
+        active_stages = {}
+        active_publishes = {}
+        pending_publishes = deque()
+        stage_candidates = deque(stage_candidates)
+        stage_inflight_limit = max(
+            1, sum(worker.get('nthreads', 1) for worker in workers.values())
+        )
+        max_pending_publish_blocks = 0
         stage_task_count = 0
         resumed_staged_block_count = len(staged_results)
-        for result in staged_results:
-            publish_one(result.block_id, active_publishes, publish_stream)
+        pending_publishes.extend(result.block_id for result in staged_results)
 
-        # A Dask retry handles ordinary transient worker loss.  When the
-        # final failure reports resource pressure (or exhausted KilledWorker
-        # retries), append a split receipt and submit only the new children.
-        # All prior stages and publishes remain immutable and reusable.
-        while stage_candidates:
-            future_blocks = {}
-            stage_futures = []
-            for block_id, block, split_depth in stage_candidates:
+        def schedule_ready_work() -> None:
+            """Keep stage and canonical-publish work independently bounded."""
+            nonlocal stage_task_count, max_pending_publish_blocks
+            while (
+                stage_candidates
+                and len(active_stages) < stage_inflight_limit
+            ):
+                block_id, block, split_depth = stage_candidates.popleft()
                 future = dc.submit(
                     stage_macro_block,
                     macros=block,
@@ -1771,15 +1768,41 @@ def run_macro_staged_publish(
                     ledger_uri=config.build_ledger_uri,
                     retries=config.build_stage_retries,
                 )
-                future_blocks[future] = (block_id, block, split_depth)
-                stage_futures.append(future)
-            stage_task_count += len(stage_futures)
-            stage_candidates = []
-            stage_stream = as_completed(
-                stage_futures, with_results=True, raise_errors=False
+                active_stages[future] = (block_id, block, split_depth)
+                completion_stream.add(future)
+                stage_task_count += 1
+            while (
+                pending_publishes
+                and len(active_publishes) < config.build_publish_concurrency
+            ):
+                block_id = pending_publishes.popleft()
+                future = dc.submit(
+                    publish_staged_macro_block,
+                    block_id=block_id,
+                    config=config,
+                    ledger_uri=config.build_ledger_uri,
+                    retries=0,
+                )
+                active_publishes[future] = block_id
+                completion_stream.add(future)
+            max_pending_publish_blocks = max(
+                max_pending_publish_blocks, len(pending_publishes)
             )
-            for future, result in stage_stream:
-                block_id, block, split_depth = future_blocks[future]
+
+        # A failed memory-bound stage yields children as soon as its future
+        # resolves.  They can be scheduled while unrelated roots continue,
+        # instead of waiting for every root in a breadth-first generation.
+        while (
+            stage_candidates
+            or active_stages
+            or pending_publishes
+            or active_publishes
+        ):
+            schedule_ready_work()
+            future, result = next(completion_stream)
+            stage = active_stages.pop(future, None)
+            if stage is not None:
+                block_id, block, split_depth = stage
                 if future.status != 'finished':
                     children = _split_failed_stage_block(
                         block_id,
@@ -1804,15 +1827,19 @@ def run_macro_staged_publish(
                                 ],
                             }
                         )
-                        stage_candidates.extend(children)
+                        # A memory split is a corrective continuation of the
+                        # failed work unit, not another breadth-first root.
+                        # Put it ahead of untouched roots so recovery starts
+                        # at the next free stage slot.
+                        stage_candidates.extendleft(reversed(children))
                     else:
                         failures.append((future, result))
-                    continue
-                staged_results.append(result)
-                publish_one(result.block_id, active_publishes, publish_stream)
-        while active_publishes:
-            future, result = next(publish_stream)
-            active_publishes.discard(future)
+                else:
+                    staged_results.append(result)
+                    pending_publishes.append(result.block_id)
+                continue
+
+            active_publishes.pop(future)
             if future.status != 'finished':
                 failures.append((future, result))
             else:
@@ -1822,6 +1849,8 @@ def run_macro_staged_publish(
             'stage_task_count': stage_task_count,
             'resume_staged_block_count': resumed_staged_block_count,
             'publisher_concurrency': config.build_publish_concurrency,
+            'stage_inflight_limit': stage_inflight_limit,
+            'max_pending_publish_blocks': max_pending_publish_blocks,
             'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
             'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,
             'stage_retries': config.build_stage_retries,
@@ -2295,55 +2324,78 @@ def plan_macro_blocks(
     )
     collar = config.processing_halo_m or 0.0
     estimates: dict[str, dict] = {}
+    # A local observation belongs to the part of the AOI that contains it,
+    # rather than becoming a (very pessimistic) source-wide density ceiling.
+    # Descendant candidates inherit intersecting observations, so a dense
+    # parent sample cannot disappear merely because a child's centre sample
+    # happens to fall between flightlines.
+    local_calibration_map: list[dict] = []
 
     plan_bounds = _block_bounds(macros)
-    sample_side = min(
-        config.stage_planner_calibration_window_m,
-        plan_bounds.maxx - plan_bounds.minx,
-        plan_bounds.maxy - plan_bounds.miny,
-    )
-    sample_grid_side = math.ceil(
-        math.sqrt(config.stage_planner_calibration_sample_count)
-    )
-    calibration_samples = []
-    for index in range(config.stage_planner_calibration_sample_count):
-        x_index = index % sample_grid_side
-        y_index = index // sample_grid_side
-        center_x = plan_bounds.minx + (
-            (x_index + 0.5) / sample_grid_side
-        ) * (plan_bounds.maxx - plan_bounds.minx)
-        center_y = plan_bounds.miny + (
-            (y_index + 0.5) / sample_grid_side
-        ) * (plan_bounds.maxy - plan_bounds.miny)
-        sample_bounds = Bounds(
-            max(plan_bounds.minx, center_x - sample_side / 2),
-            max(plan_bounds.miny, center_y - sample_side / 2),
-            min(plan_bounds.maxx, center_x + sample_side / 2),
-            min(plan_bounds.maxy, center_y + sample_side / 2),
+    def calibrate_density(
+        bounds: Bounds, sample_count: int, window_m: float
+    ) -> list[dict]:
+        """Return bounded native/coarse density observations for ``bounds``.
+
+        The previous planner applied four observations from the whole input to
+        every macro.  That misses localized overlap and dense flightlines: a
+        low-density AOI can look safe while one macro requires several worker
+        deaths before recovery splits it.  Sampling each candidate is a small
+        bounded read compared with staging the entire candidate and makes the
+        point cap a local, rather than global, contract.
+        """
+        sample_side = min(
+            window_m,
+            bounds.maxx - bounds.minx,
+            bounds.maxy - bounds.miny,
         )
-        sample_area = (sample_bounds.maxx - sample_bounds.minx) * (
-            sample_bounds.maxy - sample_bounds.miny
-        )
-        raw_points = int(data.count(sample_bounds))
-        coarse_points = int(
-            data.estimate_count(
-                sample_bounds, reader_resolution=coarse_resolution
+        sample_grid_side = math.ceil(math.sqrt(sample_count))
+        samples = []
+        for index in range(sample_count):
+            x_index = index % sample_grid_side
+            y_index = index // sample_grid_side
+            center_x = bounds.minx + (
+                (x_index + 0.5) / sample_grid_side
+            ) * (bounds.maxx - bounds.minx)
+            center_y = bounds.miny + (
+                (y_index + 0.5) / sample_grid_side
+            ) * (bounds.maxy - bounds.miny)
+            sample_bounds = Bounds(
+                max(bounds.minx, center_x - sample_side / 2),
+                max(bounds.miny, center_y - sample_side / 2),
+                min(bounds.maxx, center_x + sample_side / 2),
+                min(bounds.maxy, center_y + sample_side / 2),
             )
-        )
-        calibration_samples.append(
-            {
-                'bounds': sample_bounds.get(),
-                'area_m2': sample_area,
-                'raw_points': raw_points,
-                'coarse_points': coarse_points,
-                'raw_density_points_per_m2': (
-                    raw_points / sample_area if sample_area else 0.0
-                ),
-                'raw_per_coarse_sample': (
-                    raw_points / coarse_points if coarse_points else None
-                ),
-            }
-        )
+            sample_area = (sample_bounds.maxx - sample_bounds.minx) * (
+                sample_bounds.maxy - sample_bounds.miny
+            )
+            raw_points = int(data.count(sample_bounds))
+            coarse_points = int(
+                data.estimate_count(
+                    sample_bounds, reader_resolution=coarse_resolution
+                )
+            )
+            samples.append(
+                {
+                    'bounds': sample_bounds.get(),
+                    'area_m2': sample_area,
+                    'raw_points': raw_points,
+                    'coarse_points': coarse_points,
+                    'raw_density_points_per_m2': (
+                        raw_points / sample_area if sample_area else 0.0
+                    ),
+                    'raw_per_coarse_sample': (
+                        raw_points / coarse_points if coarse_points else None
+                    ),
+                }
+            )
+        return samples
+
+    calibration_samples = calibrate_density(
+        plan_bounds,
+        config.stage_planner_calibration_sample_count,
+        config.stage_planner_calibration_window_m,
+    )
 
     measured_multipliers = [
         sample['raw_per_coarse_sample']
@@ -2387,8 +2439,52 @@ def plan_macro_blocks(
         query_area = (query_bounds.maxx - query_bounds.minx) * (
             query_bounds.maxy - query_bounds.miny
         )
-        coarse_estimate = int(math.ceil(sample * point_multiplier))
-        density_estimate = int(math.ceil(query_area * density_ceiling))
+        local_samples = calibrate_density(
+            bounds,
+            config.stage_planner_local_calibration_sample_count,
+            config.stage_planner_local_calibration_window_m,
+        )
+        local_calibration_map.extend(local_samples)
+
+        def intersects(observation: dict) -> bool:
+            minx, miny, maxx, maxy = observation['bounds']
+            return not (
+                maxx < query_bounds.minx
+                or minx > query_bounds.maxx
+                or maxy < query_bounds.miny
+                or miny > query_bounds.maxy
+            )
+
+        # Include local reads collected for an ancestor or an adjacent
+        # candidate only when their sampled footprint intersects this query.
+        # That preserves a spatial density map through recursive splitting.
+        inherited_samples = [
+            observation
+            for observation in local_calibration_map
+            if observation not in local_samples and intersects(observation)
+        ]
+        applicable_samples = [*inherited_samples, *local_samples]
+        local_multipliers = [
+            observation['raw_per_coarse_sample']
+            for observation in applicable_samples
+            if observation['raw_per_coarse_sample'] is not None
+        ]
+        local_multiplier = max(
+            [
+                measured_multiplier,
+                configured_multiplier or 0.0,
+                *local_multipliers,
+            ]
+        ) * config.stage_planner_density_safety_factor
+        local_density = max(
+            measured_density,
+            *(
+                observation['raw_density_points_per_m2']
+                for observation in applicable_samples
+            ),
+        ) * config.stage_planner_density_safety_factor
+        coarse_estimate = int(math.ceil(sample * local_multiplier))
+        density_estimate = int(math.ceil(query_area * local_density))
         details = {
             'name': name,
             'macro_count': len(block),
@@ -2397,6 +2493,10 @@ def plan_macro_blocks(
             'estimated_coarse_raw_points': coarse_estimate,
             'estimated_density_raw_points': density_estimate,
             'estimated_max_points': max(coarse_estimate, density_estimate),
+            'local_calibration_samples': local_samples,
+            'inherited_local_density_observations': len(inherited_samples),
+            'local_point_multiplier': local_multiplier,
+            'local_density_ceiling_points_per_m2': local_density,
         }
         estimates[name] = details
         return details
@@ -2430,6 +2530,13 @@ def plan_macro_blocks(
         'density_ceiling_points_per_m2': density_ceiling,
         'density_safety_factor': config.stage_planner_density_safety_factor,
         'calibration_samples': calibration_samples,
+        'local_calibration_map': local_calibration_map,
+        'local_calibration_sample_count': (
+            config.stage_planner_local_calibration_sample_count
+        ),
+        'local_calibration_window_m': (
+            config.stage_planner_local_calibration_window_m
+        ),
         'processing_halo_m': collar,
         'target_points': target,
         'macro_count': len(macros),

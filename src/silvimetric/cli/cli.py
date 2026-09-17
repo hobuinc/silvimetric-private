@@ -392,6 +392,40 @@ def initialize_cmd(
     help='Optional Dask worker address for the macro-v3 stage writer actor.',
 )
 @click.option(
+    '--stage-planner-calibration-sample-count',
+    type=click.IntRange(min=1),
+    default=4,
+    show_default=True,
+    help='Whole-AOI bounded native reads used to establish a density floor.',
+)
+@click.option(
+    '--stage-planner-calibration-window-m',
+    type=click.FloatRange(min=0, min_open=True),
+    default=250.0,
+    show_default=True,
+    help='Side length in CRS units for each bounded planner density read.',
+)
+@click.option(
+    '--stage-planner-local-calibration-sample-count',
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help=(
+        'Bounded density reads per candidate macro; detects localized dense '
+        'flightlines before staging.'
+    ),
+)
+@click.option(
+    '--stage-planner-local-calibration-window-m',
+    type=click.FloatRange(min=0, min_open=True),
+    default=50.0,
+    show_default=True,
+    help=(
+        'Side length in CRS units for each per-candidate density read; '
+        'smaller than the whole-AOI calibration window by design.'
+    ),
+)
+@click.option(
     '--build-stage-uri',
     type=str,
     default=None,
@@ -412,10 +446,13 @@ def initialize_cmd(
 )
 @click.option(
     '--build-stage-retries',
-    type=int,
-    default=2,
+    type=click.IntRange(min=0),
+    default=0,
     show_default=True,
-    help='Safe Dask retries for one immutable macro-v4 stage task.',
+    help=(
+        'Dask retries for one immutable macro-v4 stage task. Keep zero for '
+        'memory-bound work so the failed block splits immediately.'
+    ),
 )
 @click.option(
     '--build-max-split-depth',
@@ -491,6 +528,10 @@ def shatter_cmd(
     stage_publish_uri,
     stage_fragment_size_mb,
     stage_worker_address,
+    stage_planner_calibration_sample_count,
+    stage_planner_calibration_window_m,
+    stage_planner_local_calibration_sample_count,
+    stage_planner_local_calibration_window_m,
     build_stage_uri,
     build_ledger_uri,
     build_publish_concurrency,
@@ -536,6 +577,18 @@ def shatter_cmd(
         stage_publish_uri=stage_publish_uri,
         stage_fragment_size_mb=stage_fragment_size_mb,
         stage_worker_address=stage_worker_address,
+        stage_planner_calibration_sample_count=(
+            stage_planner_calibration_sample_count
+        ),
+        stage_planner_calibration_window_m=(
+            stage_planner_calibration_window_m
+        ),
+        stage_planner_local_calibration_sample_count=(
+            stage_planner_local_calibration_sample_count
+        ),
+        stage_planner_local_calibration_window_m=(
+            stage_planner_local_calibration_window_m
+        ),
         build_stage_uri=build_stage_uri,
         build_ledger_uri=build_ledger_uri,
         build_publish_concurrency=build_publish_concurrency,
