@@ -1767,10 +1767,60 @@ def run_macro_staged_publish(
             if stage_resources is not None
             else len(workers),
         )
+        # Canonical publication should be able to live on a small, durable
+        # worker pool after the PDAL-heavy stage fleet is retired.  A generic
+        # local Dask cluster has no such resource, so preserve the historical
+        # scheduling fallback for tests and user-managed clusters.
+        publisher_resource_name = 'silvimetric_publisher'
+        publisher_resource_capacity = sum(
+            worker.get('resources', {}).get(publisher_resource_name, 0)
+            for worker in workers.values()
+        )
+        if (
+            publisher_resource_capacity
+            and publisher_resource_capacity < config.build_publish_concurrency
+        ):
+            raise RuntimeError(
+                'macro-v4 dedicated publisher capacity is smaller than '
+                'build_publish_concurrency: '
+                f'{publisher_resource_capacity} < '
+                f'{config.build_publish_concurrency}'
+            )
+        publisher_resources = (
+            {publisher_resource_name: 1}
+            if publisher_resource_capacity >= config.build_publish_concurrency
+            else None
+        )
         max_pending_publish_blocks = 0
         stage_task_count = 0
         resumed_staged_block_count = len(staged_results)
         pending_publishes.extend(result.block_id for result in staged_results)
+        stage_tasks_complete_recorded = False
+
+        def record_stage_tasks_complete() -> None:
+            """Emit a durable handoff once no memory-heavy work remains.
+
+            The record is deliberately separate from ``build_published``:
+            independent publishers may still be reading durable stages and
+            writing the canonical array.  An external fleet controller can
+            safely retire workers that advertise only ``silvimetric_stage``
+            at this point without disturbing those publishers.
+            """
+            nonlocal stage_tasks_complete_recorded
+            if stage_tasks_complete_recorded:
+                return
+            if stage_candidates or active_stages:
+                return
+            ledger.append(
+                '__build__',
+                'build_stage_tasks_complete',
+                stage_task_count=stage_task_count,
+                staged_block_count=len(staged_results),
+                pending_publish_block_count=(
+                    len(pending_publishes) + len(active_publishes)
+                ),
+            )
+            stage_tasks_complete_recorded = True
 
         def schedule_ready_work() -> None:
             """Keep stage and canonical-publish work independently bounded."""
@@ -1803,6 +1853,7 @@ def run_macro_staged_publish(
                     config=config,
                     ledger_uri=config.build_ledger_uri,
                     retries=0,
+                    resources=publisher_resources,
                 )
                 active_publishes[future] = block_id
                 completion_stream.add(future)
@@ -1820,6 +1871,7 @@ def run_macro_staged_publish(
             or active_publishes
         ):
             schedule_ready_work()
+            record_stage_tasks_complete()
             future, result = next(completion_stream)
             stage = active_stages.pop(future, None)
             if stage is not None:
@@ -1865,6 +1917,7 @@ def run_macro_staged_publish(
                 failures.append((future, result))
             else:
                 published_results.append(result)
+        record_stage_tasks_complete()
         planner['distributed_executor'] = {
             'mode': 'durable-stages-bounded-canonical-publishers',
             'stage_task_count': stage_task_count,
@@ -1873,6 +1926,10 @@ def run_macro_staged_publish(
             'stage_inflight_limit': stage_inflight_limit,
             'stage_resource': stage_resource_name if stage_resources else None,
             'stage_resource_capacity': stage_resource_capacity,
+            'publisher_resource': (
+                publisher_resource_name if publisher_resources else None
+            ),
+            'publisher_resource_capacity': publisher_resource_capacity,
             'max_pending_publish_blocks': max_pending_publish_blocks,
             'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
             'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,

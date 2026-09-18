@@ -122,6 +122,11 @@ class BuildLedger:
             # All macro stages have been durably published to the canonical
             # array.  A scheduler-only process may now perform expensive
             # array maintenance without retaining the compute fleet.
+            # No memory-heavy stage task remains in this driver.  This is an
+            # intentionally repeatable observation: an infrastructure
+            # watcher may use a newly appended receipt to retire a dedicated
+            # stage-worker fleet while bounded canonical publishers continue.
+            'build_stage_tasks_complete',
             'build_published',
             'build_consolidating',
             'build_sealed',
