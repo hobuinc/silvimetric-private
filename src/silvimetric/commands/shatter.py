@@ -1744,8 +1744,28 @@ def run_macro_staged_publish(
         active_publishes = {}
         pending_publishes = deque()
         stage_candidates = deque(stage_candidates)
+        # A stage holds a full PDAL point view and a TileDB write buffer.  It
+        # is memory-bound, unlike the lightweight driver/publisher work, and
+        # must never share a Dask worker *process* with another stage.  The
+        # EC2 fleet gives every worker process one named resource token.  A
+        # generic user-supplied cluster may not expose it, so retain a
+        # conservative one-submission-per-worker fallback rather than using
+        # the sum of worker threads (which can oversubscribe memory 4x).
+        stage_resource_name = 'silvimetric_stage'
+        stage_resource_capacity = sum(
+            worker.get('resources', {}).get(stage_resource_name, 0)
+            for worker in workers.values()
+        )
+        stage_resources = (
+            {stage_resource_name: 1}
+            if stage_resource_capacity >= len(workers)
+            else None
+        )
         stage_inflight_limit = max(
-            1, sum(worker.get('nthreads', 1) for worker in workers.values())
+            1,
+            int(stage_resource_capacity)
+            if stage_resources is not None
+            else len(workers),
         )
         max_pending_publish_blocks = 0
         stage_task_count = 0
@@ -1767,6 +1787,7 @@ def run_macro_staged_publish(
                     storage=storage,
                     ledger_uri=config.build_ledger_uri,
                     retries=config.build_stage_retries,
+                    resources=stage_resources,
                 )
                 active_stages[future] = (block_id, block, split_depth)
                 completion_stream.add(future)
@@ -1850,6 +1871,8 @@ def run_macro_staged_publish(
             'resume_staged_block_count': resumed_staged_block_count,
             'publisher_concurrency': config.build_publish_concurrency,
             'stage_inflight_limit': stage_inflight_limit,
+            'stage_resource': stage_resource_name if stage_resources else None,
+            'stage_resource_capacity': stage_resource_capacity,
             'max_pending_publish_blocks': max_pending_publish_blocks,
             'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
             'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,

@@ -855,6 +855,7 @@ class Test_Shatter(object):
             threads_per_worker=1,
             processes=False,
             dashboard_address=None,
+            resources={'silvimetric_stage': 1},
         ) as cluster:
             with Client(cluster):
                 assert shatter(config) == test_point_count
@@ -1049,6 +1050,7 @@ class Test_Shatter(object):
             threads_per_worker=1,
             processes=False,
             dashboard_address=None,
+            resources={'silvimetric_stage': 1},
         ) as cluster:
             with Client(cluster):
                 assert shatter(config) == test_point_count
@@ -1058,6 +1060,8 @@ class Test_Shatter(object):
         assert executor['stage_task_count'] >= 2
         assert executor['publisher_concurrency'] == 2
         assert executor['stage_inflight_limit'] == 2
+        assert executor['stage_resource'] == 'silvimetric_stage'
+        assert executor['stage_resource_capacity'] == 2
         assert executor['max_pending_publish_blocks'] >= 0
         assert executor['publish_retries'] == 0
         point_count = Storage.from_db(staged_dir).open('r').df[:, :][
