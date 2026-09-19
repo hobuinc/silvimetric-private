@@ -1758,7 +1758,13 @@ def run_macro_staged_publish(
         )
         stage_resources = (
             {stage_resource_name: 1}
-            if stage_resource_capacity >= len(workers)
+            # Dedicated publisher processes intentionally do not advertise a
+            # stage token.  Testing this capacity against *all* workers would
+            # therefore disable the stage restriction in a split fleet and
+            # let memory-heavy PDAL work land on a publisher.  A positive
+            # named-resource capacity is the complete signal that the
+            # cluster supports isolated stage placement.
+            if stage_resource_capacity > 0
             else None
         )
         stage_inflight_limit = max(

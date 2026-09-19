@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import dask
 import tiledb
-from dask.distributed import Client, LocalCluster
+from dask.distributed import Client, LocalCluster, SpecCluster, Worker
 from osgeo import gdal
 
 from silvimetric import (
@@ -1045,15 +1045,37 @@ class Test_Shatter(object):
             build_publish_vfs_parallel_ops=1,
             build_stage_vfs_parallel_ops=1,
         )
-        with LocalCluster(
-            n_workers=2,
-            threads_per_worker=1,
-            processes=False,
-            dashboard_address=None,
-            resources={
-                'silvimetric_stage': 1,
-                'silvimetric_publisher': 1,
+        # Model the production split fleet: stage processes are allowed to
+        # retain large PDAL point views, while canonical publishers have no
+        # stage token at all.  This prevents a future capacity check against
+        # the total number of workers from silently falling back to
+        # unrestricted stage scheduling.
+        worker_specs = {
+            **{
+                f'stage-{index}': {
+                    'cls': Worker,
+                    'options': {
+                        'nthreads': 1,
+                        'resources': {'silvimetric_stage': 1},
+                    },
+                }
+                for index in range(2)
             },
+            **{
+                f'publisher-{index}': {
+                    'cls': Worker,
+                    'options': {
+                        'nthreads': 1,
+                        'resources': {'silvimetric_publisher': 1},
+                    },
+                }
+                for index in range(2)
+            },
+        }
+        with SpecCluster(
+            workers=worker_specs,
+            asynchronous=False,
+            silence_logs=False,
         ) as cluster:
             with Client(cluster):
                 assert shatter(config) == test_point_count
