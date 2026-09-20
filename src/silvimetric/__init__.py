@@ -25,7 +25,15 @@ from .resources.config import (
     ApplicationConfig,
 )
 
-from .commands.shatter import shatter, finalize_macro_v4_staged_build
+from .commands.shatter import (
+    shatter,
+    finalize_macro_v4_staged_build,
+    plan_macro_v4_staged_build,
+    stage_macro_v4_batch_block,
+    publish_macro_v4_batch_block,
+    complete_macro_v4_batch_build,
+    split_macro_v4_batch_block,
+)
 from .commands.extract import extract
 from .commands.info import info
 from .commands.scan import scan

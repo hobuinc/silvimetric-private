@@ -82,6 +82,75 @@ def confirm_one_entry(storage, maxy, base, pointcount):
 
 
 class Test_Shatter(object):
+    def test_macro_v4_batch_operations_are_dask_independent(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """A durable plan can be staged and published one block at a time.
+
+        This is the execution contract used by the Batch worker image.  The
+        test intentionally creates no Dask client: every worker reconstructs
+        its block and configuration solely from the canonical array and the
+        append-only ledger.
+        """
+        canonical_uri = (tmp_path / 'macro-v4-batch.tdb').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = canonical_uri
+        Storage.create(staged_storage_config)
+        build_id = uuid.uuid4()
+        config = ShatterConfig(
+            name=build_id,
+            tdb_dir=canonical_uri,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=(tmp_path / 'batch-stages').as_posix(),
+            build_ledger_uri=(tmp_path / 'batch-ledger').as_posix(),
+            build_publish_concurrency=1,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+
+        plan = shatter_module.plan_macro_v4_staged_build(config)
+        assert plan.resumed is False
+        assert plan.active_block_ids
+        resumed = shatter_module.plan_macro_v4_staged_build(
+            ShatterConfig.from_string(str(config))
+        )
+        assert resumed.resumed is True
+        assert resumed.active_block_ids == plan.active_block_ids
+
+        for block_id in plan.active_block_ids:
+            shatter_module.stage_macro_v4_batch_block(
+                canonical_uri, config.build_ledger_uri, build_id, block_id
+            )
+        for block_id in plan.active_block_ids:
+            shatter_module.publish_macro_v4_batch_block(
+                canonical_uri, config.build_ledger_uri, build_id, block_id
+            )
+
+        completion = shatter_module.complete_macro_v4_batch_build(
+            canonical_uri, config.build_ledger_uri, build_id
+        )
+        assert completion['point_count'] == test_point_count
+        final_config = shatter_module.finalize_macro_v4_staged_build(
+            canonical_uri, config.build_ledger_uri, build_id
+        )
+        assert final_config.finished
+        point_count = Storage.from_db(canonical_uri).open('r').df[:, :][
+            'count'
+        ].sum()
+        assert int(point_count) == test_point_count
+
     def test_macro_v4_schema_identity_excludes_storage_uri(
         self, storage: Storage, tmp_path
     ):

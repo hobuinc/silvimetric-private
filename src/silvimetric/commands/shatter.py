@@ -771,6 +771,327 @@ def _build_signature(
     ).hexdigest()
 
 
+@dataclass(frozen=True)
+class MacroV4BatchPlan:
+    """A durable macro-v4 plan ready for an external work dispatcher.
+
+    The plan deliberately contains identifiers rather than Dask futures or
+    point data.  Batch, SQS, and a later recovery driver can all reconstruct
+    a block from its immutable ledger receipt and the canonical array's
+    persisted shatter configuration.
+    """
+
+    build_id: str
+    ledger_uri: str
+    canonical_uri: str
+    root_block_ids: tuple[str, ...]
+    active_block_ids: tuple[str, ...]
+    planner: dict
+    resumed: bool
+
+
+def _macro_v4_batch_config(
+    tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID
+) -> tuple[ShatterConfig, Storage, BuildLedger]:
+    """Load and verify the persisted contract for one external work unit."""
+    storage = Storage.from_db(tdb_dir)
+    ledger = BuildLedger(build_ledger_uri, Storage.get_tdb_context(storage))
+    manifest = ledger.build_manifest()
+    expected_id = str(build_id)
+    if manifest is None:
+        raise ValueError(
+            f'No macro-v4 build manifest exists at {build_ledger_uri!r}.'
+        )
+    if manifest.details.get('build_id') != expected_id:
+        raise ValueError(
+            'The requested build id does not match the ledger manifest: '
+            f'{expected_id!r} != {manifest.details.get("build_id")!r}.'
+        )
+    if manifest.details.get('canonical_uri', '').rstrip('/') != tdb_dir.rstrip('/'):
+        raise ValueError(
+            'The requested canonical array does not match the ledger manifest.'
+        )
+    time_slot = manifest.details.get('time_slot')
+    if time_slot is None:
+        raise ValueError(
+            'The build ledger has no recoverable macro-v4 history time slot.'
+        )
+    config = storage.get_shatter_meta(int(time_slot))
+    if (
+        config.processing_strategy != 'macro-v4-staged-publish'
+        or str(config.name) != expected_id
+        or config.build_ledger_uri != build_ledger_uri
+    ):
+        raise ValueError(
+            'Canonical-array history does not match the requested macro-v4 '
+            'external work unit.'
+        )
+    return config, storage, ledger
+
+
+def _macro_v4_batch_block(
+    block_id: str, ledger: BuildLedger, storage: Storage
+) -> tuple[list[Extents], int]:
+    """Reconstruct an active work unit from its append-only receipts."""
+    current = ledger.state(block_id)
+    if current is None:
+        raise ValueError(f'No macro-v4 receipt exists for block {block_id!r}.')
+    if current.state == 'split':
+        raise ValueError(
+            f'Macro-v4 block {block_id!r} is a split parent, not an active leaf.'
+        )
+    descriptor = current.details.get('macro_bounds')
+    split_depth = current.details.get('split_depth')
+    # A failed/publishing observation intentionally contains only failure or
+    # acknowledgement details.  Find the original planned receipt carrying
+    # the stable reconstruction descriptor.
+    if descriptor is None:
+        for record in reversed(ledger.records(block_id)):
+            descriptor = record.details.get('macro_bounds')
+            if descriptor is not None:
+                split_depth = record.details.get('split_depth', split_depth)
+                break
+    if descriptor is None:
+        raise ValueError(
+            f'Macro-v4 block {block_id!r} has no reconstruction descriptor.'
+        )
+    return _block_from_descriptor(descriptor, storage), int(split_depth or 0)
+
+
+def plan_macro_v4_staged_build(config: ShatterConfig) -> MacroV4BatchPlan:
+    """Persist a macro-v4 plan without starting a Dask or PDAL worker fleet.
+
+    ``macro-v4-staged-publish`` already uses immutable stages and receipts;
+    this function separates its planning phase so an external dispatcher can
+    run each active leaf in an isolated Batch job.  It is safe to invoke again
+    with the same build id and inputs: the ledger identity check preserves the
+    original history slot and rejects foreign inputs.
+    """
+    if config.processing_strategy != 'macro-v4-staged-publish':
+        raise ValueError(
+            'plan_macro_v4_staged_build requires macro-v4-staged-publish.'
+        )
+    if config.start_timestamp is None:
+        config.start_timestamp = int(datetime.now().timestamp() * 1000)
+
+    storage = Storage.from_db(config.tdb_dir)
+    if config.usgs_albers != storage.config.usgs_albers:
+        raise ValueError(
+            '--usgs_albers must be used exactly when the destination was '
+            'initialized with the USGS Albers grid profile'
+        )
+    data = Data(config.filename, storage.config, config.bounds)
+    extents = Extents.from_sub(config.tdb_dir, data.bounds)
+    config.bounds = data.bounds
+    ledger = BuildLedger(config.build_ledger_uri, Storage.get_tdb_context(storage))
+
+    if not config.time_slot:
+        original_manifest = ledger.build_manifest()
+        if (
+            original_manifest is not None
+            and original_manifest.details.get('build_id') == str(config.name)
+        ):
+            original_time_slot = original_manifest.details.get('time_slot')
+            if original_time_slot is None:
+                raise ValueError(
+                    'The existing build ledger predates time-slot recovery and '
+                    'cannot safely resume this canonical-array build.'
+                )
+            config.time_slot = int(original_time_slot)
+        if not config.time_slot:
+            config.time_slot = storage.reserve_time_slot()
+
+    leaf_size = storage.config.ysize * storage.config.xsize
+    potential_leaves = extents.get_root_aligned_leaf_children(leaf_size)
+    macros = [
+        macro
+        for extent in potential_leaves
+        for macro in extents.get_overlap(extent).get_leaf_children(
+            config.read_group_size
+        )
+    ]
+    macro_blocks, planner = plan_macro_blocks(macros, config, storage, data)
+    root_blocks = {_shard_name(block): block for block in macro_blocks}
+    if len(root_blocks) != len(macro_blocks):
+        raise RuntimeError('Macro-v4 planner produced non-unique block IDs.')
+    root_block_ids = tuple(sorted(root_blocks))
+    build_signature = _build_signature(config, storage, list(root_block_ids))
+    build_inputs = _build_inputs(config, storage, list(root_block_ids))
+    original_manifest = ledger.build_manifest()
+    resumed = ledger.assert_build_identity(
+        build_id=str(config.name),
+        canonical_uri=config.tdb_dir,
+        build_signature=build_signature,
+        build_inputs=build_inputs,
+    )
+    if not resumed:
+        ledger.append(
+            '__build__',
+            'build_started',
+            build_id=str(config.name),
+            canonical_uri=config.tdb_dir,
+            planned_block_count=len(root_block_ids),
+            schema_sha256=_block_schema_hash(storage),
+            build_signature=build_signature,
+            build_inputs=build_inputs,
+            time_slot=config.time_slot,
+        )
+    else:
+        config.time_slot = int(original_manifest.details['time_slot'])
+
+    storage.set_context_overrides(
+        **{'vfs.s3.max_parallel_ops': config.build_publish_vfs_parallel_ops}
+    )
+    storage.save_shatter_meta(config)
+    for block_id in root_block_ids:
+        if ledger.state(block_id) is None:
+            ledger.append(
+                block_id,
+                'planned',
+                **_ledger_block_details(
+                    root_blocks[block_id], parent_id=None, split_depth=0
+                ),
+            )
+    active_blocks = _active_ledger_blocks(root_blocks, ledger, storage)
+    return MacroV4BatchPlan(
+        build_id=str(config.name),
+        ledger_uri=config.build_ledger_uri,
+        canonical_uri=config.tdb_dir,
+        root_block_ids=root_block_ids,
+        active_block_ids=tuple(sorted(active_blocks)),
+        planner=planner,
+        resumed=resumed,
+    )
+
+
+def stage_macro_v4_batch_block(
+    tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID, block_id: str
+) -> 'MacroTaskResult':
+    """Run one reconstructed macro-v4 stage outside Dask.
+
+    Batch workers call this after acquiring an external lease.  The function
+    deliberately does not claim or lock work: object-store receipts remain
+    portable while DynamoDB supplies the queue-specific atomic lease.
+    """
+    config, storage, ledger = _macro_v4_batch_config(
+        tdb_dir, build_ledger_uri, build_id
+    )
+    macros, _ = _macro_v4_batch_block(block_id, ledger, storage)
+    return stage_macro_block(macros, config, storage, build_ledger_uri)
+
+
+def publish_macro_v4_batch_block(
+    tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID, block_id: str
+) -> 'MacroTaskResult':
+    """Publish one durable macro-v4 stage outside Dask."""
+    config, _storage, _ledger = _macro_v4_batch_config(
+        tdb_dir, build_ledger_uri, build_id
+    )
+    return publish_staged_macro_block(block_id, config, build_ledger_uri)
+
+
+def complete_macro_v4_batch_build(
+    tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID
+) -> dict:
+    """Record the durable Batch-to-finalizer handoff after all leaves publish.
+
+    A Batch completion monitor calls this operation instead of inferring
+    success from job counts.  The ledger can include adaptive children, so it
+    reconstructs the active plan tree and refuses to seal a build with even
+    one missing/staged/failed leaf.
+    """
+    config, storage, ledger = _macro_v4_batch_config(
+        tdb_dir, build_ledger_uri, build_id
+    )
+    manifest = ledger.build_manifest()
+    assert manifest is not None  # verified by _macro_v4_batch_config
+    root_ids = manifest.details.get('build_inputs', {}).get('block_ids')
+    if not root_ids:
+        raise ValueError('The macro-v4 build manifest has no root block IDs.')
+
+    root_blocks: dict[str, list[Extents]] = {}
+    for root_id in root_ids:
+        descriptor = None
+        for record in reversed(ledger.records(root_id)):
+            descriptor = record.details.get('macro_bounds')
+            if descriptor is not None:
+                break
+        if descriptor is None:
+            raise ValueError(
+                f'Macro-v4 root {root_id!r} has no reconstruction descriptor.'
+            )
+        root_blocks[root_id] = _block_from_descriptor(descriptor, storage)
+
+    active_blocks = _active_ledger_blocks(root_blocks, ledger, storage)
+    active_block_ids = sorted(active_blocks)
+    summary = ledger.summary(active_block_ids)
+    records = summary['records']
+    incomplete = {
+        block_id: record.state if record is not None else 'missing'
+        for block_id, record in records.items()
+        if record is None or record.state != 'published'
+    }
+    if incomplete:
+        raise RuntimeError(
+            'Cannot complete this macro-v4 Batch build while active leaves '
+            f'are incomplete: {incomplete!r}'
+        )
+
+    point_count = sum(
+        int(record.details.get('point_count', 0))
+        for record in records.values()
+        if record is not None
+    )
+    existing_stage_complete = _latest_build_receipt(
+        ledger, 'build_stage_tasks_complete'
+    )
+    if existing_stage_complete is None:
+        ledger.append(
+            '__build__',
+            'build_stage_tasks_complete',
+            stage_task_count=len(active_block_ids),
+            staged_block_count=len(active_block_ids),
+            pending_publish_block_count=0,
+            executor='batch',
+        )
+    published_build = {
+        'build_id': str(build_id),
+        'planned_block_count': len(active_block_ids),
+        'root_block_count': len(root_ids),
+        'published_block_count': len(active_block_ids),
+        'point_count': point_count,
+        'executor': 'batch',
+    }
+    if _latest_build_receipt(ledger, 'build_published') is None:
+        ledger.append('__build__', 'build_published', **published_build)
+    # The finalizer reads the durable receipt rather than this return value.
+    # Returning it lets a queue monitor render progress without scanning
+    # TileDB fragments or trusting approximate SQS counts.
+    return {**published_build, 'states': summary['states']}
+
+
+def split_macro_v4_batch_block(
+    tdb_dir: str,
+    build_ledger_uri: str,
+    build_id: str | uuid.UUID,
+    block_id: str,
+    error: BaseException,
+) -> list[tuple[str, list[Extents], int]]:
+    """Record an externally observed failure and create adaptive children.
+
+    This is used by a small on-demand reconciliation job after an OOM-killed
+    Batch container, where Python in the original stage process had no chance
+    to emit its own failure receipt.
+    """
+    config, storage, ledger = _macro_v4_batch_config(
+        tdb_dir, build_ledger_uri, build_id
+    )
+    macros, split_depth = _macro_v4_batch_block(block_id, ledger, storage)
+    return _split_failed_stage_block(
+        block_id, macros, split_depth, error, config, ledger
+    )
+
+
 def stage_macro_block(
     macros: list[Extents],
     config: ShatterConfig,
