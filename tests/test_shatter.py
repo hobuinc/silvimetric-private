@@ -151,6 +151,63 @@ class Test_Shatter(object):
         ].sum()
         assert int(point_count) == test_point_count
 
+    def test_macro_v4_publish_commit_index_recovers_before_receipt(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A verified commit avoids a second canonical range scan on resume."""
+        canonical_uri = (tmp_path / 'macro-v4-commit-recovery.tdb').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = canonical_uri
+        Storage.create(staged_storage_config)
+        build_id = uuid.uuid4()
+        config = ShatterConfig(
+            name=build_id,
+            tdb_dir=canonical_uri,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=1,
+            stage_fragment_size_mb=1,
+            build_stage_uri=(tmp_path / 'commit-stages').as_posix(),
+            build_ledger_uri=(tmp_path / 'commit-ledger').as_posix(),
+            build_publish_concurrency=1,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+        plan = shatter_module.plan_macro_v4_staged_build(config)
+        block_id = plan.active_block_ids[0]
+        shatter_module.stage_macro_v4_batch_block(
+            canonical_uri, config.build_ledger_uri, build_id, block_id
+        )
+
+        original_append = BuildLedger.append
+
+        def crash_before_published_receipt(self, block, state, *args, **kwargs):
+            if block == block_id and state == 'published':
+                raise KeyboardInterrupt('after verified commit index')
+            return original_append(self, block, state, *args, **kwargs)
+
+        monkeypatch.setattr(BuildLedger, 'append', crash_before_published_receipt)
+        with pytest.raises(KeyboardInterrupt, match='verified commit index'):
+            shatter_module.publish_macro_v4_batch_block(
+                canonical_uri, config.build_ledger_uri, build_id, block_id
+            )
+        monkeypatch.setattr(BuildLedger, 'append', original_append)
+
+        recovered = shatter_module.publish_macro_v4_batch_block(
+            canonical_uri, config.build_ledger_uri, build_id, block_id
+        )
+        assert recovered.publish_commit_index_recovered
+        assert BuildLedger(config.build_ledger_uri).state(block_id).state == 'published'
+
     def test_macro_v4_schema_identity_excludes_storage_uri(
         self, storage: Storage, tmp_path
     ):
@@ -860,6 +917,23 @@ class Test_Shatter(object):
         assert sealed is not None
         assert sealed.state == 'build_sealed'
         assert sealed.details['point_count'] == test_point_count
+
+        # Each normal publish retains phase telemetry for fleet tuning and a
+        # verified commit index for the crash window before its normal ledger
+        # receipt becomes visible.
+        block_id = next(
+            path.name
+            for path in (tmp_path / 'durable-ledger' / 'blocks').iterdir()
+            if path.name != '__build__'
+        )
+        published = ledger.state(block_id)
+        assert published is not None
+        assert published.state == 'published'
+        assert published.details['publish_stage_read_seconds'] >= 0
+        assert published.details['publish_precheck_seconds'] >= 0
+        assert published.details['publish_postcheck_seconds'] >= 0
+        assert published.details['publish_logical_tiledb_reads'] >= 2
+        assert ledger.publish_commit(block_id) is not None
 
         # Same build name and ledger is the explicit resume contract.  The
         # run derives point totals from published receipts rather than writing

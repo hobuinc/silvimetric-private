@@ -633,6 +633,18 @@ def _result_details(result: 'MacroTaskResult') -> dict:
         'join_seconds': float(result.join_seconds),
         'write_seconds': float(result.write_seconds),
         'total_seconds': float(result.total_seconds),
+        'stage_publish_seconds': float(result.stage_publish_seconds),
+        'publish_stage_read_seconds': float(result.publish_stage_read_seconds),
+        'publish_precheck_seconds': float(result.publish_precheck_seconds),
+        'publish_write_seconds': float(result.publish_write_seconds),
+        'publish_postcheck_seconds': float(result.publish_postcheck_seconds),
+        'publish_commit_seconds': float(result.publish_commit_seconds),
+        'publish_receipt_seconds': float(result.publish_receipt_seconds),
+        'publish_stage_data_bytes': int(result.publish_stage_data_bytes),
+        'publish_peak_rss_bytes': int(result.publish_peak_rss_bytes),
+        'publish_logical_tiledb_reads': int(result.publish_logical_tiledb_reads),
+        'publish_logical_tiledb_writes': int(result.publish_logical_tiledb_writes),
+        'publish_commit_index_recovered': bool(result.publish_commit_index_recovered),
         'macro_diagnostics': result.macro_diagnostics,
     }
 
@@ -652,6 +664,30 @@ def _result_from_details(
         total_seconds=float(details.get('total_seconds', 0.0)),
         stage_uri=stage_uri,
         macro_count=int(details.get('macro_count', 1)),
+        stage_publish_seconds=float(details.get('stage_publish_seconds', 0.0)),
+        publish_stage_read_seconds=float(
+            details.get('publish_stage_read_seconds', 0.0)
+        ),
+        publish_precheck_seconds=float(details.get('publish_precheck_seconds', 0.0)),
+        publish_write_seconds=float(details.get('publish_write_seconds', 0.0)),
+        publish_postcheck_seconds=float(
+            details.get('publish_postcheck_seconds', 0.0)
+        ),
+        publish_commit_seconds=float(details.get('publish_commit_seconds', 0.0)),
+        publish_receipt_seconds=float(
+            details.get('publish_receipt_seconds', 0.0)
+        ),
+        publish_stage_data_bytes=int(details.get('publish_stage_data_bytes', 0)),
+        publish_peak_rss_bytes=int(details.get('publish_peak_rss_bytes', 0)),
+        publish_logical_tiledb_reads=int(
+            details.get('publish_logical_tiledb_reads', 0)
+        ),
+        publish_logical_tiledb_writes=int(
+            details.get('publish_logical_tiledb_writes', 0)
+        ),
+        publish_commit_index_recovered=bool(
+            details.get('publish_commit_index_recovered', False)
+        ),
         macro_diagnostics=details.get('macro_diagnostics', []),
     )
 
@@ -1160,6 +1196,16 @@ def stage_macro_block(
         'signature': signature,
         'schema_sha256': _block_schema_hash(storage),
         'bounds': _block_bounds(macros).get(),
+        # The stage URI is immutable; this compact manifest binds its logical
+        # contents and schema to the later publisher without adding a global
+        # TileDB metadata write.
+        'stage_manifest': {
+            'version': 1,
+            'uri': stage_uri,
+            'logical_data_bytes': int(staged_data.memory_usage(deep=True).sum()),
+            'signature': signature,
+            'schema_sha256': _block_schema_hash(storage),
+        },
     }
     ledger.append(block_id, 'staged', attempt_id=attempt_id, **receipt)
     return result
@@ -1197,40 +1243,98 @@ def publish_staged_macro_block(
         raise RuntimeError(
             f'Staged block {block_id!r} was built with a different schema.'
         )
+    # A publish commit is written only after the strict post-write canonical
+    # verification below.  It makes the usual crash window (write succeeded,
+    # receipt not yet appended) cheap to recover without weakening normal
+    # correctness checks.
+    commit = ledger.publish_commit(block_id)
+    if commit is not None:
+        committed = commit.get('details', {})
+        if (
+            committed.get('stage_uri') == stage_uri
+            and committed.get('signature') == details['signature']
+            and committed.get('schema_sha256') == details['schema_sha256']
+        ):
+            result.publish_commit_index_recovered = True
+            result.publish_commit_seconds = float(
+                committed.get('publish_commit_seconds', 0.0)
+            )
+            ledger.append(
+                block_id,
+                'published',
+                stage_uri=stage_uri,
+                reconciled=True,
+                commit_index_uri=commit['uri'],
+                commit_index_recovered=True,
+                **_result_details(result),
+                signature=details['signature'],
+                schema_sha256=details['schema_sha256'],
+                bounds=details['bounds'],
+            )
+            return result
+
+    monitor = MacroMemoryMonitor()
+    published_started = perf_counter()
+    stage_read_started = perf_counter()
     _stage, staged_data = _read_populated_stage(
         stage_uri, config.build_publish_vfs_parallel_ops
     )
+    result.publish_stage_read_seconds = perf_counter() - stage_read_started
+    result.publish_stage_data_bytes = int(staged_data.memory_usage(deep=True).sum())
+    result.publish_logical_tiledb_reads = 1
     actual_signature = _data_signature(staged_data)
     if actual_signature != details['signature']:
         raise RuntimeError(
             f'Staged block {block_id!r} no longer matches its ledger receipt.'
         )
-    started = perf_counter()
     ledger.append(block_id, 'publishing', stage_uri=stage_uri)
+    precheck_started = perf_counter()
     reconciled = _canonical_signature(canonical, staged_data) == actual_signature
+    result.publish_precheck_seconds = perf_counter() - precheck_started
+    result.publish_logical_tiledb_reads += 1
     if not reconciled and not staged_data.empty:
+        write_started = perf_counter()
         canonical.write(
             staged_data.drop(columns=['start_time', 'end_time']).rename(
                 columns={'X': 'xi', 'Y': 'yi'}
             ),
             config.date,
         )
+        result.publish_write_seconds = perf_counter() - write_started
+        result.publish_logical_tiledb_writes = 1
+    postcheck_started = perf_counter()
     if _canonical_signature(canonical, staged_data) != actual_signature:
         raise RuntimeError(
             f'Canonical write for block {block_id!r} could not be reconciled.'
         )
-    result.stage_publish_seconds = perf_counter() - started
+    result.publish_postcheck_seconds = perf_counter() - postcheck_started
+    result.publish_logical_tiledb_reads += 1
+    result.publish_peak_rss_bytes = int(monitor.stop()['rss_peak_bytes'] or 0)
+    result.stage_publish_seconds = perf_counter() - published_started
+    commit_started = perf_counter()
+    commit_uri = ledger.append_publish_commit(
+        block_id,
+        stage_uri=stage_uri,
+        signature=actual_signature,
+        schema_sha256=details['schema_sha256'],
+        bounds=details['bounds'],
+        **_result_details(result),
+    )
+    result.publish_commit_seconds = perf_counter() - commit_started
     result.block_id = block_id
+    receipt_started = perf_counter()
     ledger.append(
         block_id,
         'published',
         stage_uri=stage_uri,
         reconciled=reconciled,
+        commit_index_uri=commit_uri,
         **_result_details(result),
         signature=actual_signature,
         schema_sha256=details['schema_sha256'],
         bounds=details['bounds'],
     )
+    result.publish_receipt_seconds = perf_counter() - receipt_started
     return result
 
 
@@ -1401,6 +1505,17 @@ class MacroTaskResult:
     published_fragment_count: int = 0
     published_bytes: int = 0
     stage_publish_seconds: float = 0.0
+    publish_stage_read_seconds: float = 0.0
+    publish_precheck_seconds: float = 0.0
+    publish_write_seconds: float = 0.0
+    publish_postcheck_seconds: float = 0.0
+    publish_commit_seconds: float = 0.0
+    publish_receipt_seconds: float = 0.0
+    publish_stage_data_bytes: int = 0
+    publish_peak_rss_bytes: int = 0
+    publish_logical_tiledb_reads: int = 0
+    publish_logical_tiledb_writes: int = 0
+    publish_commit_index_recovered: bool = False
     macro_diagnostics: list[dict] = field(default_factory=list)
 
     @classmethod

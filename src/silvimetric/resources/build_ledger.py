@@ -99,6 +99,17 @@ class BuildLedger:
     def block_uri(self, block_id: str) -> str:
         return _join_uri(self.uri, 'blocks', block_id)
 
+    def publish_commit_uri(self, block_id: str) -> str:
+        """Return the immutable, per-block canonical-commit index prefix.
+
+        The main transition log remains the source of truth for build state.
+        This small side index closes the short recovery window between a
+        verified TileDB write and the subsequent ``published`` transition:
+        a worker which dies in that interval can be recovered without reading
+        the canonical range a second time.
+        """
+        return _join_uri(self.uri, 'publish-commits', block_id)
+
     def _record_uri(self, record: BuildRecord) -> str:
         # The attempt and monotonic-ish timestamp make every record immutable,
         # including repeated observations of a stable state after recovery.
@@ -146,6 +157,52 @@ class BuildLedger:
         with vfs.open(uri, 'wb') as stream:
             stream.write(json.dumps(record.to_json(), sort_keys=True).encode())
         return BuildRecord(**{**record.__dict__, 'uri': uri})
+
+    def append_publish_commit(
+        self, block_id: str, *, attempt_id: str | None = None, **details: Any
+    ) -> str:
+        """Persist a verified canonical-write commit index record.
+
+        This is intentionally a separate immutable document rather than an
+        array metadata update: array metadata would introduce a global write
+        hot spot among spatially independent publishers.  The document is
+        written only *after* range/signature verification, so it is safe to
+        use during reconciliation when a process never reached ``append`` for
+        the normal ``published`` ledger transition.
+        """
+        attempt = attempt_id or uuid.uuid4().hex
+        created_at_ns = time.time_ns()
+        document = {
+            'block_id': block_id,
+            'attempt_id': attempt,
+            'created_at_ns': created_at_ns,
+            'details': details,
+        }
+        name = f'{created_at_ns:020d}-commit-{attempt}.json'
+        uri = _join_uri(self.publish_commit_uri(block_id), name)
+        vfs = self._vfs()
+        vfs.create_dir(self.publish_commit_uri(block_id))
+        with vfs.open(uri, 'wb') as stream:
+            stream.write(json.dumps(document, sort_keys=True).encode())
+        return uri
+
+    def publish_commit(self, block_id: str) -> dict[str, Any] | None:
+        """Return the latest verified canonical-commit index record."""
+        vfs = self._vfs()
+        prefix = self.publish_commit_uri(block_id)
+        if not vfs.is_dir(prefix):
+            return None
+        commits: list[dict[str, Any]] = []
+        for uri in vfs.ls(prefix):
+            if not uri.endswith('.json'):
+                continue
+            with vfs.open(uri, 'rb') as stream:
+                value = json.loads(stream.read())
+            value['uri'] = uri
+            commits.append(value)
+        if not commits:
+            return None
+        return max(commits, key=lambda value: int(value['created_at_ns']))
 
     def records(self, block_id: str) -> list[BuildRecord]:
         """Read all immutable records for one planned block."""

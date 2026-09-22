@@ -44,3 +44,24 @@ def test_build_identity_rejects_a_foreign_resume(tmp_path):
             canonical_uri='file:///canonical',
             build_signature='signature-b',
         )
+
+
+def test_publish_commit_index_recovers_verified_write_window(tmp_path):
+    """The index survives a crash after verification but before receipt."""
+    ledger = BuildLedger((tmp_path / 'ledger').as_posix())
+    commit_uri = ledger.append_publish_commit(
+        'block-a',
+        stage_uri='file:///stage-a',
+        schema_sha256='schema',
+        signature={'point_count': 10, 'cell_count': 2},
+    )
+
+    commit = ledger.publish_commit('block-a')
+    assert commit is not None
+    # TileDB VFS normalizes a local path to ``file://`` when listing it.
+    assert commit['uri'].removeprefix('file://') == commit_uri
+    assert commit['details'] == {
+        'stage_uri': 'file:///stage-a',
+        'schema_sha256': 'schema',
+        'signature': {'point_count': 10, 'cell_count': 2},
+    }
