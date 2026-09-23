@@ -2830,6 +2830,20 @@ def plan_macro_blocks(
     recursively bisects only windows above the configured raw-point cap.
     ``None`` retains the explicitly requested fixed-side fallback.
     """
+    planning_started = perf_counter()
+
+    def processing_grid_digest(blocks: list[list[Extents]]) -> str:
+        # A publish block may contain several processing macros. It is the
+        # macro bounds, not the enclosing block bounds, that control PDAL's
+        # SMRF/HAG neighbourhood and therefore the resulting pixel values.
+        cores = sorted(
+            tuple(macro.bounds.get()) for block in blocks for macro in block
+        )
+        return hashlib.sha256(
+            json.dumps(cores, separators=(',', ':')).encode('utf8')
+        ).hexdigest()
+
+    input_grid = processing_grid_digest([macros])
     target = config.stage_shard_target_points
     if target is None:
         blocks = group_macro_blocks(macros, config, storage)
@@ -2838,6 +2852,11 @@ def plan_macro_blocks(
             'stage_shard_side_macros': config.stage_shard_side_macros,
             'macro_count': len(macros),
             'planned_shard_count': len(blocks),
+            'input_processing_grid_sha256': input_grid,
+            'processing_grid_sha256': processing_grid_digest(blocks),
+            'processing_macro_count': sum(map(len, blocks)),
+            'processing_macro_split_count': 0,
+            'planner_wall_seconds': round(perf_counter() - planning_started, 6),
         }
 
     base_resolution = storage.config.resolution
@@ -2852,6 +2871,48 @@ def plan_macro_blocks(
     # parent sample cannot disappear merely because a child's centre sample
     # happens to fall between flightlines.
     local_calibration_map: list[dict] = []
+    query_timing = {
+        'native_sample_calls': 0,
+        'native_sample_seconds': 0.0,
+        'coarse_query_calls': 0,
+        'coarse_query_seconds': 0.0,
+    }
+
+    def report_progress(phase: str) -> None:
+        print(
+            'SILVIMETRIC_PLANNER_PROGRESS '
+            + json.dumps(
+                {
+                    'phase': phase,
+                    'elapsed_seconds': round(perf_counter() - planning_started, 3),
+                    'candidate_count': len(estimates),
+                    'native_sample_calls': query_timing['native_sample_calls'],
+                    'coarse_query_calls': query_timing['coarse_query_calls'],
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+    def native_count(bounds: Bounds) -> int:
+        started = perf_counter()
+        try:
+            return int(data.count(bounds))
+        finally:
+            query_timing['native_sample_calls'] += 1
+            query_timing['native_sample_seconds'] += perf_counter() - started
+
+    def coarse_count(bounds: Bounds) -> int:
+        started = perf_counter()
+        try:
+            return int(
+                data.estimate_count(
+                    bounds, reader_resolution=coarse_resolution
+                )
+            )
+        finally:
+            query_timing['coarse_query_calls'] += 1
+            query_timing['coarse_query_seconds'] += perf_counter() - started
 
     plan_bounds = _block_bounds(macros)
     def calibrate_density(
@@ -2891,12 +2952,8 @@ def plan_macro_blocks(
             sample_area = (sample_bounds.maxx - sample_bounds.minx) * (
                 sample_bounds.maxy - sample_bounds.miny
             )
-            raw_points = int(data.count(sample_bounds))
-            coarse_points = int(
-                data.estimate_count(
-                    sample_bounds, reader_resolution=coarse_resolution
-                )
-            )
+            raw_points = native_count(sample_bounds)
+            coarse_points = coarse_count(sample_bounds)
             samples.append(
                 {
                     'bounds': sample_bounds.get(),
@@ -2918,6 +2975,7 @@ def plan_macro_blocks(
         config.stage_planner_calibration_sample_count,
         config.stage_planner_calibration_window_m,
     )
+    report_progress('source_calibration')
 
     measured_multipliers = [
         sample['raw_per_coarse_sample']
@@ -2953,11 +3011,7 @@ def plan_macro_blocks(
             bounds.maxx + collar,
             bounds.maxy + collar,
         )
-        sample = int(
-            data.estimate_count(
-                query_bounds, reader_resolution=coarse_resolution
-            )
-        )
+        sample = coarse_count(query_bounds)
         query_area = (query_bounds.maxx - query_bounds.minx) * (
             query_bounds.maxy - query_bounds.miny
         )
@@ -3021,6 +3075,8 @@ def plan_macro_blocks(
             'local_density_ceiling_points_per_m2': local_density,
         }
         estimates[name] = details
+        if len(estimates) % 25 == 0:
+            report_progress('candidate_estimation')
         return details
 
     def split(block: list[Extents], depth: int = 0) -> list[list[Extents]]:
@@ -3040,6 +3096,7 @@ def plan_macro_blocks(
 
     blocks = split(macros)
     selected = [estimate(block) for block in blocks]
+    report_progress('complete')
     return blocks, {
         'method': 'pdal-summary-coarse-resolution-upper-bound',
         'count_source': 'bounded-reader-execution',
@@ -3063,6 +3120,15 @@ def plan_macro_blocks(
         'target_points': target,
         'macro_count': len(macros),
         'planned_shard_count': len(blocks),
+        'input_processing_grid_sha256': input_grid,
+        'processing_grid_sha256': processing_grid_digest(blocks),
+        'processing_macro_count': sum(map(len, blocks)),
+        'processing_macro_split_count': sum(map(len, blocks)) - len(macros),
+        'planner_wall_seconds': round(perf_counter() - planning_started, 6),
+        'query_timing': {
+            key: round(value, 6) if key.endswith('_seconds') else value
+            for key, value in query_timing.items()
+        },
         'estimated_max_points': sum(
             window['estimated_max_points'] for window in selected
         ),

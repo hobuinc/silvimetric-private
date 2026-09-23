@@ -82,6 +82,90 @@ def confirm_one_entry(storage, maxy, base, pointcount):
 
 
 class Test_Shatter(object):
+    def test_batch_and_dask_paths_match_with_identical_processing_cores(
+        self,
+        shatter_config: ShatterConfig,
+        storage: Storage,
+        test_point_count: int,
+        tmp_path,
+    ):
+        """Execution technology alone must not change a fixed-grid result."""
+
+        def build_config(label: str) -> ShatterConfig:
+            canonical_uri = (tmp_path / f'{label}.tdb').as_posix()
+            storage_config = copy.deepcopy(storage.config)
+            storage_config.tdb_dir = canonical_uri
+            Storage.create(storage_config)
+            return ShatterConfig(
+                name=uuid.uuid4(),
+                tdb_dir=canonical_uri,
+                filename=shatter_config.filename,
+                bounds=shatter_config.bounds,
+                date=shatter_config.date,
+                tile_size=1,
+                read_group_size=4,
+                processing_halo_m=shatter_config.processing_halo_m,
+                processing_strategy='macro-v4-staged-publish',
+                stage_shard_side_macros=1,
+                stage_shard_target_points=None,
+                stage_fragment_size_mb=1,
+                build_stage_uri=(tmp_path / f'{label}-stages').as_posix(),
+                build_ledger_uri=(tmp_path / f'{label}-ledger').as_posix(),
+                build_publish_concurrency=1,
+                build_publish_vfs_parallel_ops=1,
+                build_stage_vfs_parallel_ops=1,
+            )
+
+        dask_config = build_config('dask-path')
+        with Client(processes=False, n_workers=2, threads_per_worker=1):
+            assert shatter(dask_config) == test_point_count
+
+        batch_config = build_config('batch-path')
+        plan = shatter_module.plan_macro_v4_staged_build(batch_config)
+        for block_id in plan.active_block_ids:
+            shatter_module.stage_macro_v4_batch_block(
+                batch_config.tdb_dir,
+                batch_config.build_ledger_uri,
+                batch_config.name,
+                block_id,
+            )
+            shatter_module.publish_macro_v4_batch_block(
+                batch_config.tdb_dir,
+                batch_config.build_ledger_uri,
+                batch_config.name,
+                block_id,
+            )
+        completed = shatter_module.complete_macro_v4_batch_build(
+            batch_config.tdb_dir,
+            batch_config.build_ledger_uri,
+            batch_config.name,
+        )
+        assert completed['point_count'] == test_point_count
+        shatter_module.finalize_macro_v4_staged_build(
+            batch_config.tdb_dir,
+            batch_config.build_ledger_uri,
+            batch_config.name,
+        )
+
+        dask_plan = dask_config.execution_timing['planner']
+        assert dask_plan['processing_grid_sha256'] == (
+            plan.planner['processing_grid_sha256']
+        )
+        assert dask_plan['processing_macro_split_count'] == 0
+        assert plan.planner['processing_macro_split_count'] == 0
+
+        def raster_values(uri: str) -> pd.DataFrame:
+            values = Storage.from_db(uri).open('r').df[:, :]
+            return values[['X', 'Y', 'count', 'm_Z_mean']].sort_values(
+                ['X', 'Y']
+            ).reset_index(drop=True)
+
+        pd.testing.assert_frame_equal(
+            raster_values(dask_config.tdb_dir),
+            raster_values(batch_config.tdb_dir),
+            check_exact=True,
+        )
+
     def test_macro_v4_batch_operations_are_dask_independent(
         self,
         shatter_config: ShatterConfig,
@@ -299,6 +383,10 @@ class Test_Shatter(object):
         )
         assert planner['point_multiplier_source'] == 'bounded-native-calibration'
         assert len(planner['calibration_samples']) == 4
+        assert planner['query_timing']['native_sample_calls'] > 0
+        assert planner['query_timing']['coarse_query_calls'] > 0
+        assert planner['planner_wall_seconds'] >= 0
+        assert len(planner['input_processing_grid_sha256']) == 64
 
     def test_adaptive_planner_subdivides_an_over_limit_singleton_macro(
         self,
@@ -341,6 +429,10 @@ class Test_Shatter(object):
         )
 
         assert len(blocks) > 1
+        assert planner['processing_macro_split_count'] > 0
+        assert planner['processing_grid_sha256'] != (
+            planner['input_processing_grid_sha256']
+        )
         assert all(
             window['estimated_max_points'] <= 1_200
             for window in planner['windows']
