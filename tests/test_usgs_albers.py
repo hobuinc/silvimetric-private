@@ -237,7 +237,7 @@ def test_profile_shatter_flag_must_match_database(autzen_filepath, tmp_path):
         raise AssertionError('profile mismatch unexpectedly wrote the database')
 
 
-def test_cli_initializes_profile_without_user_bounds_or_crs(runner, tmp_path):
+def test_cli_defaults_to_profile_without_user_bounds_or_crs(runner, tmp_path):
     database = tmp_path / 'profile.tdb'
     result = runner.invoke(
         cli.cli,
@@ -245,7 +245,6 @@ def test_cli_initializes_profile_without_user_bounds_or_crs(runner, tmp_path):
             '-d',
             str(database),
             'initialize',
-            '--usgs_albers',
             '--resolution',
             '20',
             '--xsize',
@@ -261,7 +260,22 @@ def test_cli_initializes_profile_without_user_bounds_or_crs(runner, tmp_path):
     assert config.root == USGS_ALBERS_CONUS_BOUNDS
 
 
-def test_cli_shatter_reprojects_into_profile(
+def test_cli_can_explicitly_opt_out_of_albers(runner, tmp_path):
+    database = tmp_path / 'source-crs.tdb'
+    result = runner.invoke(
+        cli.cli,
+        [
+            '-d', str(database), 'initialize', '--no-usgs-albers',
+            '--bounds', '[0, 0, 100, 100]', '--crs', 'EPSG:3857',
+            '--resolution', '20', '--xsize', '5', '--ysize', '5',
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert not Storage.from_db(str(database)).config.usgs_albers
+
+
+def test_cli_shatter_inherits_profile_without_flag(
     runner, autzen_filepath, tmp_path
 ):
     database = tmp_path / 'profile.tdb'
@@ -275,7 +289,6 @@ def test_cli_shatter_reprojects_into_profile(
             'single-threaded',
             'shatter',
             autzen_filepath,
-            '--usgs_albers',
             '--bounds',
             str(WINDOW_A),
             '--date',

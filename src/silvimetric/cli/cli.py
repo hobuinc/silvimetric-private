@@ -6,7 +6,7 @@ import logging
 
 from .. import __version__
 from .. import Attribute, Metric, Bounds, Log
-from .. import StorageConfig, ShatterConfig, ExtractConfig, ApplicationConfig
+from .. import Storage, StorageConfig, ShatterConfig, ExtractConfig, ApplicationConfig
 from ..commands import shatter, extract, scan, info, initialize, manage
 from .common import (
     BoundsParamType,
@@ -272,9 +272,13 @@ def scan_cmd(
 @click.option(
     '--usgs_albers', '--usgs-albers',
     'usgs_albers',
-    is_flag=True,
-    default=False,
-    help='Use the fixed pixel-is-area EPSG:5070+5703 CONUS grid profile.',
+    flag_value=True,
+    default=None,
+    help='Use the fixed pixel-is-area EPSG:5070+5703 CONUS grid profile (default unless bounds/CRS are specified).',
+)
+@click.option(
+    '--no-usgs-albers', 'usgs_albers', flag_value=False,
+    help='Use an explicitly supplied bounds and CRS instead of USGS Albers.',
 )
 @click.pass_obj
 def initialize_cmd(
@@ -291,9 +295,11 @@ def initialize_cmd(
 ):
     """Initialize silvimetrics DATABASE"""
 
+    if usgs_albers is None:
+        usgs_albers = bounds is None and crs is None
     if not usgs_albers and (bounds is None or crs is None):
         raise click.UsageError(
-            '--bounds and --crs are required unless --usgs_albers is used'
+            '--bounds and --crs are required for a non-USGS-Albers database'
         )
 
     storageconfig = StorageConfig(
@@ -323,12 +329,16 @@ def initialize_cmd(
 @click.option(
     '--usgs_albers', '--usgs-albers',
     'usgs_albers',
-    is_flag=True,
-    default=False,
+    flag_value=True,
+    default=None,
     help=(
         'Use a USGS-Albers-profile database and interpret --bounds as '
         'EPSG:5070 target bounds.'
     ),
+)
+@click.option(
+    '--no-usgs-albers', 'usgs_albers', flag_value=False,
+    help='Explicitly use a legacy source-CRS database.',
 )
 @click.option(
     '--tilesize',
@@ -561,6 +571,12 @@ def shatter_cmd(
 
     if date is None and dates is None:
         raise ValueError("One of '--date' or '--dates' must be provided.")
+
+    if usgs_albers is None:
+        # A shatter must follow its existing destination's spatial profile.
+        # This also keeps old source-CRS databases usable without requiring
+        # an explicit compatibility flag on every subsequent insertion.
+        usgs_albers = Storage.from_db(app.tdb_dir).config.usgs_albers
 
     config = ShatterConfig(
         tdb_dir=app.tdb_dir,
