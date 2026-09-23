@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 import os
 import copy
+import xml.etree.ElementTree as ET
 
 from silvimetric import (
     Storage,
@@ -172,11 +173,30 @@ class Test_Storage(object):
             gdal_metadata, metadata_type = array.meta.__getitem__(
                 '_gdal', include_type=True
             )
-            assert metadata_type == tiledb.libtiledb.DataType.UINT8
-            assert gdal_metadata.dtype == np.uint8
-            assert gdal_metadata.tobytes().decode('utf-8').startswith(
-                '<PAMDataset>'
+            assert metadata_type == tiledb.libtiledb.DataType.STRING_UTF8
+            assert isinstance(gdal_metadata, str)
+            # TileDB-Py maps __np_flat__gdal back to _gdal for Python callers.
+            # Check the physical key that the GDAL C++ driver actually reads.
+            assert array.meta._array_or_group._has_metadata('_gdal')
+            assert not array.meta._array_or_group._has_metadata(
+                '__np_flat__gdal'
             )
+            root = ET.fromstring(gdal_metadata)
+            assert root.tag == 'PAMDataset'
+            for band in root.findall('PAMRasterBand'):
+                name = band.findtext('Description')
+                subdataset = root.find(f"./Subdataset[@name='{name}']/PAMDataset")
+                assert subdataset is not None
+                assert subdataset.findtext('SRS') == root.findtext('SRS')
+                assert subdataset.findtext('GeoTransform') == root.findtext(
+                    'GeoTransform'
+                )
+                assert subdataset.findtext(
+                    "./Metadata[@domain='IMAGE_STRUCTURE']/MDI[@key='NUM_BANDS']"
+                ) == '1'
+                assert subdataset.findtext(
+                    "./PAMRasterBand[@band='1']/Description"
+                ) == name
 
         shatter_config.time_slot = storage.reserve_time_slot()
         storage.save_shatter_meta(shatter_config)

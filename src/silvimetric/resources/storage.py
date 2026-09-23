@@ -248,13 +248,10 @@ class Storage:
             ),
             attrs=gdal_attrs,
         )
-        # GDAL's TileDB dense-array reader expects the PAM XML in UINT8
-        # metadata.  TileDB-Py stores a Python str as STRING_UTF8, so pass a
-        # uint8 buffer explicitly for this GDAL-specific metadata item.
-        s.save_metadata(
-            '_gdal',
-            np.frombuffer(gdal_metadata.encode('utf-8'), dtype=np.uint8),
-        )
+        # TileDB-Py stores a NumPy array under its private __np_flat_ prefix,
+        # which GDAL's TileDB driver cannot see. A string uses the literal
+        # _gdal key and the STRING_UTF8 type accepted by that driver.
+        s.save_metadata('_gdal', gdal_metadata)
         s.save_metadata('dataset_type', 'raster')
         s.save_config()
 
@@ -378,6 +375,10 @@ class Storage:
                 value
             )
 
+        # An explicit TILEDB:<array>:<attribute> open loads only the matching
+        # Subdataset/PAMDataset child. It does not inherit the root's spatial
+        # metadata or logical dimensions, so duplicate those for each band.
+        common_nodes = list(root)
         for index, attr in enumerate(attrs, start=1):
             dtype = _GDAL_DATA_TYPES.get(np.dtype(attr.dtype))
             band = ET.SubElement(
@@ -386,6 +387,22 @@ class Storage:
             ET.SubElement(band, 'Description').text = attr.name
             if dtype is not None:
                 ET.SubElement(band, 'DataType').text = dtype
+
+            subdataset = ET.SubElement(
+                root, 'Subdataset', attrib={'name': attr.name}
+            )
+            subdataset_pam = ET.SubElement(subdataset, 'PAMDataset')
+            for node in common_nodes:
+                subdataset_pam.append(copy.deepcopy(node))
+            subdataset_structure = subdataset_pam.find(
+                "./Metadata[@domain='IMAGE_STRUCTURE']/MDI[@key='NUM_BANDS']"
+            )
+            if subdataset_structure is None:
+                raise RuntimeError('Missing GDAL IMAGE_STRUCTURE NUM_BANDS')
+            subdataset_structure.text = '1'
+            subdataset_band = copy.deepcopy(band)
+            subdataset_band.set('band', '1')
+            subdataset_pam.append(subdataset_band)
 
         ET.indent(root, space='  ')
         return ET.tostring(root, encoding='unicode')

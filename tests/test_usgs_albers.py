@@ -70,10 +70,8 @@ def test_profile_owns_crs_root_and_pixel_is_area_contract(tmp_path):
 
     storage = Storage.create(config)
     with tiledb.open(storage.config.tdb_dir, 'r') as array:
-        # TileDB-Py returns a view backed by the open Array's metadata buffer.
-        # Retain an owned copy after closing the Array.
-        gdal_metadata = array.meta['_gdal'].copy()
-    root = ET.fromstring(gdal_metadata.tobytes().decode('utf-8'))
+        gdal_metadata = array.meta['_gdal']
+    root = ET.fromstring(gdal_metadata)
     assert root.findtext("./Metadata/MDI[@key='AREA_OR_POINT']") == 'Area'
     assert root.findtext('./GeoTransform') == (
         '-2493045.0, 20.0, 0.0, 3310005.0, 0.0, -20.0'
