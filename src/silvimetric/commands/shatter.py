@@ -745,9 +745,11 @@ def _canonical_signature(
     minx, maxx = int(staged_data.X.min()), int(staged_data.X.max())
     miny, maxy = int(staged_data.Y.min()), int(staged_data.Y.max())
     with storage.open('r') as reader:
-        candidate = reader.query(attrs=['count'], coords=True).df[
-            minx:maxx, miny:maxy
-        ]
+        query = reader.query(attrs=['count'], coords=True)
+        if storage.config.dimension_order == 'YX':
+            candidate = query.df[miny:maxy, minx:maxx]
+        else:
+            candidate = query.df[minx:maxx, miny:maxy]
     return _data_signature(candidate)
 
 

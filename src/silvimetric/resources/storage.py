@@ -138,21 +138,28 @@ class Storage:
         padded_xi = ((xi + 1 + xsize - 1) // xsize) * xsize - 1
         padded_yi = ((yi + 1 + ysize - 1) // ysize) * ysize - 1
 
-        dim_row = tiledb.Dim(
+        dim_x = tiledb.Dim(
             name='X',
             domain=(0, padded_xi),
             dtype=np.uint64,
             tile=xsize,
             filters=tiledb.FilterList([tiledb.ZstdFilter(level = 7)]),
         )
-        dim_col = tiledb.Dim(
+        dim_y = tiledb.Dim(
             name='Y',
             domain=(0, padded_yi),
             dtype=np.uint64,
             tile=ysize,
             filters=tiledb.FilterList([tiledb.ZstdFilter(level = 7)]),
         )
-        domain = tiledb.Domain(dim_row, dim_col)
+        # GDAL's two-dimensional TileDB raster driver addresses arrays in
+        # row-major (Y, X) order. Older Silvimetric arrays used (X, Y);
+        # retain that explicit layout only for their saved configurations.
+        domain = (
+            tiledb.Domain(dim_y, dim_x)
+            if config.dimension_order == 'YX'
+            else tiledb.Domain(dim_x, dim_y)
+        )
 
         count_att = tiledb.Attr(
             name='count',
@@ -670,8 +677,12 @@ class Storage:
         yi_vals = data_in.Y
         xrange = range(xi_vals.min(), xi_vals.max() + 1)
         yrange = range(yi_vals.min(), yi_vals.max() + 1)
-        mi = pd.MultiIndex.from_product([xrange, yrange], names=['X', 'Y'])
-        d = data_in.set_index(['X', 'Y'])
+        if self.config.dimension_order == 'YX':
+            mi = pd.MultiIndex.from_product([yrange, xrange], names=['Y', 'X'])
+            d = data_in.set_index(['Y', 'X'])
+        else:
+            mi = pd.MultiIndex.from_product([xrange, yrange], names=['X', 'Y'])
+            d = data_in.set_index(['X', 'Y'])
 
         listed = d.reindex(mi)
         isna = listed[self.config.attrs[0].name].isna()
@@ -689,7 +700,11 @@ class Storage:
                 listed.loc[isna, attr] = pd.Series(
                     [np.array([nan_value], dtype=dtype)] * isna.sum()
                 ).values
-            data_in = listed.reset_index()
+        # TileDB's dense writer consumes attribute buffers in physical
+        # dimension order. It does not reshuffle them by coordinate names.
+        # Preserve the complete ordered rectangle even when no fill cells
+        # were needed, or Y,X arrays silently transpose their values.
+        data_in = listed.reset_index()
 
         # Date ranges are represented as integer days since the Unix epoch.
         # This keeps the TileDB schema readable by GDAL's raster driver.
@@ -798,13 +813,21 @@ class Storage:
 
         ex = Extents.from_sub(self, config.bounds)
         af_all = self.get_fragments(config.timestamp, config.bounds)
-        mbrs_list = tuple(af.nonempty_domain for af in af_all)
+        mbrs_list = tuple(
+            self._xy_mbr(af.nonempty_domain) for af in af_all
+        )
         mbrs = tuple(
             tuple(tuple(a.item() for a in mb) for mb in m)
             for m in mbrs_list
             if not ex.disjoint_by_mbr(m)
         )
         return mbrs
+
+    def _xy_mbr(self, mbr):
+        """Normalize a physical TileDB domain to Silvimetric's X,Y order."""
+        if mbr is None:
+            return None
+        return mbr[::-1] if self.config.dimension_order == 'YX' else mbr
 
     def get_fragments(
         self,
@@ -834,10 +857,13 @@ class Storage:
                 continue
             if bounds is not None:
                 if a.mbrs:
-                    if all(ex.disjoint_by_mbr(mbr) for mbr in a.mbrs):
+                    if all(
+                        ex.disjoint_by_mbr(self._xy_mbr(mbr))
+                        for mbr in a.mbrs
+                    ):
                         continue
                 elif a.nonempty_domain:
-                    if ex.disjoint_by_mbr(a.nonempty_domain):
+                    if ex.disjoint_by_mbr(self._xy_mbr(a.nonempty_domain)):
                         continue
             fragments.append(a)
         return fragments
@@ -858,7 +884,7 @@ class Storage:
             timestamp=config.timestamp, bounds=config.bounds, encompass=True
         )
         for fragment in fragments:
-            xs, ys = fragment.nonempty_domain
+            xs, ys = self._xy_mbr(fragment.nonempty_domain)
             x1, x2 = xs
             y1, y2 = ys
             x2 = x2 + 1

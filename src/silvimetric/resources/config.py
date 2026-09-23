@@ -85,6 +85,9 @@ class StorageConfig(Config):
     """TileDB Y Tile size for IO operations."""
     usgs_albers: bool = field(default=False)
     """Use the canonical, pixel-is-area USGS CONUS Albers grid profile."""
+    dimension_order: str = field(default='YX')
+    """Physical TileDB dimension order. New raster arrays use Y,X as GDAL
+    requires; X,Y remains readable for arrays created by older versions."""
 
     attrs: list[Attribute] = field(
         default_factory=lambda: [
@@ -109,6 +112,8 @@ class StorageConfig(Config):
     use., defaults to 1"""
 
     def __post_init__(self) -> None:
+        if self.dimension_order not in ('XY', 'YX'):
+            raise ValueError('dimension_order must be XY or YX')
         if self.usgs_albers:
             # A profile database deliberately owns both of these values.  A
             # full common root makes its local TileDB indices globally stable
@@ -213,6 +218,7 @@ class StorageConfig(Config):
             xsize=x['xsize'],
             ysize=x['ysize'],
             usgs_albers=x.get('usgs_albers', False),
+            dimension_order=x.get('dimension_order', 'XY'),
         )
 
         return n

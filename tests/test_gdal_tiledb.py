@@ -7,13 +7,16 @@ from math import floor
 from pathlib import Path
 import shutil
 import subprocess
+from datetime import datetime
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from silvimetric import (
     Attributes,
     Bounds,
+    ExtractConfig,
     Log,
     ShatterConfig,
     Storage,
@@ -22,6 +25,8 @@ from silvimetric import (
 )
 from silvimetric.resources.metrics.grid_metrics import get_grid_metrics
 from silvimetric.resources.storage import _GDAL_DATA_TYPES
+from silvimetric.resources.extents import Extents
+from silvimetric.commands.extract import get_data as extract_data
 
 
 def _gdalinfo() -> str:
@@ -76,6 +81,96 @@ def test_gdal_cli_reads_usgs_albers_profile(tmp_path):
     assert 'Conus Albers' in dataset['coordinateSystem']['wkt']
     assert 'NAVD88' in dataset['coordinateSystem']['wkt']
     assert dataset['metadata']['']['AREA_OR_POINT'] == 'Area'
+
+
+def test_gdal_reads_albers_pixel_values_at_their_world_location(tmp_path):
+    """An asymmetric window catches a physical X,Y / raster Y,X swap."""
+    gdalinfo = _gdalinfo()
+    gdal_translate = str(Path(gdalinfo).with_name('gdal_translate'))
+    mean = copy.deepcopy(get_grid_metrics()['mean'])
+    mean.attributes = [copy.deepcopy(Attributes['Z'])]
+    storage = Storage.create(StorageConfig(
+        tdb_dir=str(tmp_path / 'albers-values.tdb'),
+        root=Bounds(1, 2, 3, 4),
+        crs='EPSG:3857',
+        resolution=20,
+        xsize=64,
+        ysize=64,
+        attrs=[copy.deepcopy(Attributes['Z'])],
+        metrics=[mean],
+        usgs_albers=True,
+    ))
+    assert storage.config.dimension_order == 'YX'
+    date = datetime(2026, 1, 1)
+    storage.write(pd.DataFrame({
+        'xi': [120, 121],
+        'yi': [220, 220],
+        'Z': [np.array([10.0]), np.array([20.0])],
+        'm_Z_mean': [10.0, 20.0],
+        'count': [1, 1],
+        'shatter_process_num': [1, 1],
+    }), (date, date))
+
+    with storage.open('r') as array:
+        assert [array.schema.domain.dim(i).name for i in range(2)] == ['Y', 'X']
+        cells = array.query(attrs=['m_Z_mean'], coords=True).df[220:220, 120:121]
+        assert cells['m_Z_mean'].tolist() == [10.0, 20.0]
+
+    result = _run([
+        gdal_translate, '-q', '-of', 'XYZ', '-srcwin', '120', '220', '2', '1',
+        f'TILEDB:{storage.config.tdb_dir}:m_Z_mean', '/vsistdout/',
+    ])
+    assert result.returncode == 0, result.stderr
+    values = [float(line.split()[-1]) for line in result.stdout.splitlines()]
+    assert values == [10.0, 20.0]
+
+
+@pytest.mark.parametrize('dimension_order', ['XY', 'YX'])
+def test_extract_reads_legacy_and_gdal_dimension_orders(tmp_path, dimension_order):
+    mean = copy.deepcopy(get_grid_metrics()['mean'])
+    mean.attributes = [copy.deepcopy(Attributes['Z'])]
+    uri = str(tmp_path / f'{dimension_order}.tdb')
+    storage = Storage.create(StorageConfig(
+        tdb_dir=uri,
+        root=Bounds(1, 2, 3, 4),
+        crs='EPSG:3857',
+        resolution=20,
+        xsize=64,
+        ysize=64,
+        attrs=[copy.deepcopy(Attributes['Z'])],
+        metrics=[mean],
+        usgs_albers=True,
+        dimension_order=dimension_order,
+    ))
+    date = datetime(2026, 1, 1)
+    storage.write(pd.DataFrame({
+        'xi': [120, 121], 'yi': [220, 220],
+        'Z': [np.array([10.0]), np.array([20.0])],
+        'm_Z_mean': [10.0, 20.0],
+        'count': [1, 1],
+        'shatter_process_num': [1, 1],
+    }), (date, date))
+    if dimension_order == 'XY':
+        # Pre-migration arrays do not have the field at all.
+        metadata = json.loads(storage.get_metadata('config'))
+        metadata.pop('dimension_order')
+        with storage.open('w') as array:
+            array.meta['config'] = json.dumps(metadata)
+
+    reopened = Storage.from_db(uri)
+    assert reopened.config.dimension_order == dimension_order
+    root = reopened.config.root
+    bounds = Bounds(
+        root.minx + 120 * 20, root.maxy - 221 * 20,
+        root.minx + 122 * 20, root.maxy - 220 * 20,
+    )
+    config = ExtractConfig(
+        tdb_dir=uri, out_dir=str(tmp_path / f'{dimension_order}-extract'),
+        attrs=reopened.config.attrs, metrics=reopened.config.metrics,
+        bounds=bounds, date=(date, date),
+    )
+    cells = extract_data(config, reopened, Extents.from_sub(reopened, bounds))
+    assert cells.reset_index().sort_values('X')['m_Z_mean'].tolist() == [10.0, 20.0]
 
 
 def test_gdal_cli_reads_every_metric(

@@ -118,12 +118,16 @@ def get_data(
 
         # older versions of silvimetric supported multiple values, and
         # for backwards compatibility we will try to accept it still
-        data = tdb.query(
+        query = tdb.query(
             attrs=[*ma_list, 'end_time', 'start_time'],
             order='F',
             cond=cond,
             coords=True,
-        ).df[minx : maxx - 1, miny : maxy - 1]
+        )
+        if storage.config.dimension_order == 'YX':
+            data = query.df[miny : maxy - 1, minx : maxx - 1]
+        else:
+            data = query.df[minx : maxx - 1, miny : maxy - 1]
 
         if np.issubdtype(data.end_time.dtype, np.datetime64):
             start_filter = np.datetime64(config.date[0], 'D')
