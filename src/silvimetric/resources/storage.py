@@ -424,8 +424,10 @@ class Storage:
         with self.open('w') as w:
             w.meta['config'] = serialized
         self._serialized_config = serialized
-        if self._reader is not None:
-            self._reader.reopen()
+        # Metadata writes invalidate the cached read snapshot. It may also
+        # have been closed by a caller using ``with self.open('r')``; opening
+        # a fresh reader on the next access handles both cases.
+        self._reader = None
 
     def get_config(self) -> StorageConfig:
         """
@@ -485,8 +487,7 @@ class Storage:
         # propogate the key-value to both tiledb and the local copy
         with self.open('w') as w:
             w.meta[key] = data
-        if self._reader is not None:
-            self._reader.reopen()
+        self._reader = None
 
     @staticmethod
     def get_tdb_context(_storage=None):

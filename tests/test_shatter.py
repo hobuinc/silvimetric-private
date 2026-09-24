@@ -82,6 +82,28 @@ def confirm_one_entry(storage, maxy, base, pointcount):
 
 
 class Test_Shatter(object):
+    def test_macro_v4_write_rectangles_coalesce_without_covering_holes(self):
+        root = Bounds(0, 0, 120, 120)
+
+        def macro(x, y):
+            return Extents(
+                Bounds(x * 30, 120 - (y + 1) * 30,
+                       (x + 1) * 30, 120 - y * 30),
+                30, 'PixelIsArea', root,
+            )
+
+        l_shape = [macro(0, 0), macro(1, 0), macro(0, 1)]
+        assert shatter_module._coalesced_macro_rectangles(l_shape) == [
+            (0, 0, 2, 1), (0, 1, 1, 2)
+        ]
+        assert shatter_module._coalesced_macro_rectangles(
+            [*l_shape, macro(1, 1)]
+        ) == [(0, 0, 2, 2)]
+        with pytest.raises(RuntimeError, match='overlapping macro cores'):
+            shatter_module._coalesced_macro_rectangles(
+                [macro(0, 0), macro(0, 0)]
+            )
+
     def test_macro_v4_publisher_preserves_cells_inside_another_blocks_hole(
         self, shatter_config: ShatterConfig, storage: Storage, tmp_path,
     ):
@@ -156,8 +178,11 @@ class Test_Shatter(object):
                 cell_count=len(block_cells),
                 bounds=shatter_module._block_bounds(macros).get(),
             )
-            shatter_module.publish_staged_macro_block(
+            published = shatter_module.publish_staged_macro_block(
                 block_id, config, ledger_uri
+            )
+            assert published.publish_logical_tiledb_writes == (
+                1 if index == 0 else 2
             )
 
         with Storage.from_db(canonical_uri).open('r') as reader:
@@ -261,6 +286,7 @@ class Test_Shatter(object):
         storage: Storage,
         test_point_count: int,
         tmp_path,
+        monkeypatch,
     ):
         """A durable plan can be staged and published one block at a time.
 
@@ -311,10 +337,26 @@ class Test_Shatter(object):
                 canonical_uri, config.build_ledger_uri, build_id, block_id
             )
 
+        real_canonical_count = shatter_module._canonical_point_count
+        monkeypatch.setattr(
+            shatter_module, '_canonical_point_count',
+            lambda *_args, **_kwargs: test_point_count - 1,
+        )
+        with pytest.raises(RuntimeError, match='canonical count attribute'):
+            shatter_module.complete_macro_v4_batch_build(
+                canonical_uri, config.build_ledger_uri, build_id
+            )
+        assert shatter_module._latest_build_receipt(
+            BuildLedger(config.build_ledger_uri), 'build_published'
+        ) is None
+        monkeypatch.setattr(
+            shatter_module, '_canonical_point_count', real_canonical_count
+        )
         completion = shatter_module.complete_macro_v4_batch_build(
             canonical_uri, config.build_ledger_uri, build_id
         )
         assert completion['point_count'] == test_point_count
+        assert completion['canonical_point_count'] == test_point_count
         final_config = shatter_module.finalize_macro_v4_staged_build(
             canonical_uri, config.build_ledger_uri, build_id
         )
@@ -1215,6 +1257,7 @@ class Test_Shatter(object):
         storage: Storage,
         test_point_count: int,
         tmp_path,
+        monkeypatch,
     ):
         """Workers may disappear after publishing without blocking sealing."""
         staged_dir = (tmp_path / 'macro-v4-deferred.tdb').as_posix()
@@ -1261,12 +1304,30 @@ class Test_Shatter(object):
         # No LocalCluster or Dask client exists here. This proves that the
         # expensive canonical maintenance phase depends only on the ledger and
         # canonical array, not on workers, source EPT access, or PDAL.
+        real_canonical_count = shatter_module._canonical_point_count
+        monkeypatch.setattr(
+            shatter_module, '_canonical_point_count',
+            lambda *_args, **_kwargs: test_point_count - 1,
+        )
+        with pytest.raises(RuntimeError, match='post-consolidation canonical'):
+            shatter_module.finalize_macro_v4_staged_build(
+                staged_dir, ledger_uri, config.name
+            )
+        assert shatter_module._latest_build_receipt(
+            ledger, 'build_sealed'
+        ) is None
+        monkeypatch.setattr(
+            shatter_module, '_canonical_point_count', real_canonical_count
+        )
         finalized = shatter_module.finalize_macro_v4_staged_build(
             staged_dir, ledger_uri, config.name
         )
         assert finalized.finished
         assert finalized.point_count == test_point_count
         assert ledger.state('__build__').state == 'build_sealed'
+        assert ledger.state('__build__').details['canonical_point_count'] == (
+            test_point_count
+        )
         assert finalized.execution_timing['array']['fragment_count_before'] >= 1
         point_count = Storage.from_db(staged_dir).open('r').df[:, :][
             'count'

@@ -68,6 +68,17 @@ class Test_Storage(object):
         assert config.crs == storage.config.crs
         assert storage.config.version == svversion
 
+    def test_metadata_write_after_closed_cached_reader(self, storage: Storage):
+        """A context-managed read must not break later metadata updates."""
+        with storage.open('r') as reader:
+            assert reader.schema.has_attr('count')
+        storage.save_metadata('cached_reader_regression', 'current')
+        assert storage.get_metadata('cached_reader_regression') == 'current'
+        with storage.open('r') as reader:
+            assert reader.meta['cached_reader_regression'] == 'current'
+        storage.save_config()
+        assert storage.get_config().resolution == storage.config.resolution
+
     def test_metric_dependencies(
         self,
         tmp_path_factory,

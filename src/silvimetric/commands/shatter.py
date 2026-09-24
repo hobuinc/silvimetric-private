@@ -798,7 +798,7 @@ def _canonical_point_count(
 def _stage_macro_partitions(
     staged_data: pd.DataFrame, macros: list[Extents]
 ) -> list[pd.DataFrame]:
-    """Partition a stage into disjoint macro rectangles for dense writes.
+    """Partition a stage into disjoint, coalesced rectangles for dense writes.
 
     ``Storage.write`` must fill every cell in a rectangular TileDB slice.
     Writing the bounding rectangle of an irregular multi-macro block would
@@ -808,19 +808,64 @@ def _stage_macro_partitions(
     y = staged_data['Y'].to_numpy()
     assigned = np.zeros(len(staged_data), dtype=bool)
     partitions = []
-    for macro in macros:
+    for x1, y1, x2, y2 in _coalesced_macro_rectangles(macros):
         in_macro = (
-            (x >= macro.x1) & (x < macro.x2)
-            & (y >= macro.y1) & (y < macro.y2)
+            (x >= x1) & (x < x2) & (y >= y1) & (y < y2)
         )
         if np.any(assigned & in_macro):
-            raise RuntimeError('Macro-v4 stage has overlapping macro cores.')
+            raise RuntimeError('Macro-v4 stage has overlapping write rectangles.')
         assigned |= in_macro
         if np.any(in_macro):
             partitions.append(staged_data.loc[in_macro])
     if not np.all(assigned):
         raise RuntimeError('Macro-v4 stage has cells outside its planned cores.')
     return partitions
+
+
+def _coalesced_macro_rectangles(
+    macros: list[Extents],
+) -> list[tuple[int, int, int, int]]:
+    """Cover disjoint macro cores with fewer rectangles, without filling holes.
+
+    Sweep the exact grid-row boundaries of the planned cores. Each row band
+    merges touching X intervals, then identical intervals in neighboring
+    bands merge vertically. Unlike a bounding-box write, every returned
+    rectangle lies wholly inside the union of the planned cores.
+    """
+    if not macros:
+        return []
+    y_edges = sorted({edge for macro in macros for edge in (macro.y1, macro.y2)})
+    active: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+    completed = []
+    for y1, y2 in zip(y_edges, y_edges[1:]):
+        intervals = sorted(
+            (macro.x1, macro.x2)
+            for macro in macros
+            if macro.y1 <= y1 and macro.y2 >= y2
+        )
+        merged = []
+        for x1, x2 in intervals:
+            if x1 >= x2:
+                raise RuntimeError('Macro-v4 stage has an empty macro core.')
+            if merged and x1 < merged[-1][1]:
+                raise RuntimeError('Macro-v4 stage has overlapping macro cores.')
+            if merged and x1 == merged[-1][1]:
+                merged[-1] = (merged[-1][0], x2)
+            else:
+                merged.append((x1, x2))
+        current = set(merged)
+        for interval in tuple(active):
+            if interval not in current:
+                completed.append(active.pop(interval))
+        for x1, x2 in merged:
+            key = (x1, x2)
+            if key in active:
+                old = active[key]
+                active[key] = (x1, old[1], x2, y2)
+            else:
+                active[key] = (x1, y1, x2, y2)
+    completed.extend(active.values())
+    return sorted(completed, key=lambda rect: (rect[1], rect[0], rect[3]))
 
 
 def _block_schema_hash(storage: Storage) -> str:
@@ -1098,6 +1143,31 @@ def publish_macro_v4_batch_block(
     return publish_staged_macro_block(block_id, config, build_ledger_uri)
 
 
+def _macro_v4_root_blocks(
+    ledger: BuildLedger, storage: Storage
+) -> dict[str, list[Extents]]:
+    """Reconstruct root cores, including roots that later split into leaves."""
+    manifest = ledger.build_manifest()
+    if manifest is None:
+        raise ValueError('The macro-v4 build has no durable manifest.')
+    root_ids = manifest.details.get('build_inputs', {}).get('block_ids')
+    if not root_ids:
+        raise ValueError('The macro-v4 build manifest has no root block IDs.')
+    root_blocks: dict[str, list[Extents]] = {}
+    for root_id in root_ids:
+        descriptor = None
+        for record in reversed(ledger.records(root_id)):
+            descriptor = record.details.get('macro_bounds')
+            if descriptor is not None:
+                break
+        if descriptor is None:
+            raise ValueError(
+                f'Macro-v4 root {root_id!r} has no reconstruction descriptor.'
+            )
+        root_blocks[root_id] = _block_from_descriptor(descriptor, storage)
+    return root_blocks
+
+
 def complete_macro_v4_batch_build(
     tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID
 ) -> dict:
@@ -1111,24 +1181,8 @@ def complete_macro_v4_batch_build(
     config, storage, ledger = _macro_v4_batch_config(
         tdb_dir, build_ledger_uri, build_id
     )
-    manifest = ledger.build_manifest()
-    assert manifest is not None  # verified by _macro_v4_batch_config
-    root_ids = manifest.details.get('build_inputs', {}).get('block_ids')
-    if not root_ids:
-        raise ValueError('The macro-v4 build manifest has no root block IDs.')
-
-    root_blocks: dict[str, list[Extents]] = {}
-    for root_id in root_ids:
-        descriptor = None
-        for record in reversed(ledger.records(root_id)):
-            descriptor = record.details.get('macro_bounds')
-            if descriptor is not None:
-                break
-        if descriptor is None:
-            raise ValueError(
-                f'Macro-v4 root {root_id!r} has no reconstruction descriptor.'
-            )
-        root_blocks[root_id] = _block_from_descriptor(descriptor, storage)
+    root_blocks = _macro_v4_root_blocks(ledger, storage)
+    root_ids = tuple(root_blocks)
 
     active_blocks = _active_ledger_blocks(root_blocks, ledger, storage)
     active_block_ids = sorted(active_blocks)
@@ -2744,6 +2798,16 @@ def _seal_macro_v4_staged_build(
             storage.consolidate(mode)
             storage.vacuum(mode)
         fragments_after = storage.stage_fragment_summary()
+        root_blocks = _macro_v4_root_blocks(ledger, storage)
+        canonical_count = _canonical_point_count(
+            storage, [macro for block in root_blocks.values() for macro in block]
+        )
+        if canonical_count != config.point_count:
+            raise RuntimeError(
+                'Cannot seal macro-v4 build: the post-consolidation canonical '
+                f'count is {canonical_count}, but published receipts total '
+                f'{config.point_count}.'
+            )
     except BaseException as error:
         # The earlier build_published receipt remains the source of truth for
         # a retry; this marker only identifies the failed phase for operators.
@@ -2769,6 +2833,7 @@ def _seal_macro_v4_staged_build(
         'root_block_count': published.details['root_block_count'],
         'published_block_count': published.details['published_block_count'],
         'point_count': config.point_count,
+        'canonical_point_count': canonical_count,
         'fragment_count': len(fragments_after),
         'fragment_bytes': sum(fragment['bytes'] for fragment in fragments_after),
     }
