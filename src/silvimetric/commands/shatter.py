@@ -757,7 +757,70 @@ def _canonical_signature(
             candidate = query.df[miny:maxy, minx:maxx]
         else:
             candidate = query.df[minx:maxx, miny:maxy]
-    return _data_signature(candidate)
+    # Other, disjoint macro cores can lie inside this block's bounding box.
+    # They must not make a successful publish appear to have a different
+    # footprint. Compare only the cells owned by this immutable stage.
+    owned = candidate.merge(
+        staged_data[['X', 'Y']], on=['X', 'Y'], how='inner', validate='one_to_one'
+    )
+    return _data_signature(owned)
+
+
+def _canonical_point_count(
+    storage: Storage, macros: list[Extents], row_chunk: int = 256
+) -> int:
+    """Sum the canonical count attribute over a bounded build footprint.
+
+    Receipt counts describe what stages produced, not necessarily what
+    survived subsequent dense writes. Scan only ``count`` in row chunks so a
+    finalizer can detect an overwritten cell without loading point arrays or
+    every metric into memory.
+    """
+    if not macros:
+        return 0
+    x1 = min(macro.x1 for macro in macros)
+    x2 = max(macro.x2 for macro in macros)
+    y1 = min(macro.y1 for macro in macros)
+    y2 = max(macro.y2 for macro in macros)
+    total = 0
+    with storage.open('r') as reader:
+        for row in range(y1, y2, row_chunk):
+            stop = min(row + row_chunk, y2) - 1
+            query = reader.query(attrs=['count'])
+            if storage.config.dimension_order == 'YX':
+                values = query.df[row:stop, x1:x2 - 1]
+            else:
+                values = query.df[x1:x2 - 1, row:stop]
+            total += int(values['count'].sum())
+    return total
+
+
+def _stage_macro_partitions(
+    staged_data: pd.DataFrame, macros: list[Extents]
+) -> list[pd.DataFrame]:
+    """Partition a stage into disjoint macro rectangles for dense writes.
+
+    ``Storage.write`` must fill every cell in a rectangular TileDB slice.
+    Writing the bounding rectangle of an irregular multi-macro block would
+    fill its holes with zero and erase cells belonging to other blocks.
+    """
+    x = staged_data['X'].to_numpy()
+    y = staged_data['Y'].to_numpy()
+    assigned = np.zeros(len(staged_data), dtype=bool)
+    partitions = []
+    for macro in macros:
+        in_macro = (
+            (x >= macro.x1) & (x < macro.x2)
+            & (y >= macro.y1) & (y < macro.y2)
+        )
+        if np.any(assigned & in_macro):
+            raise RuntimeError('Macro-v4 stage has overlapping macro cores.')
+        assigned |= in_macro
+        if np.any(in_macro):
+            partitions.append(staged_data.loc[in_macro])
+    if not np.all(assigned):
+        raise RuntimeError('Macro-v4 stage has cells outside its planned cores.')
+    return partitions
 
 
 def _block_schema_hash(storage: Storage) -> str:
@@ -1087,6 +1150,15 @@ def complete_macro_v4_batch_build(
         for record in records.values()
         if record is not None
     )
+    canonical_count = _canonical_point_count(
+        storage, [macro for block in root_blocks.values() for macro in block]
+    )
+    if canonical_count != point_count:
+        raise RuntimeError(
+            'Cannot complete macro-v4 Batch build: canonical count attribute '
+            f'contains {canonical_count} points, but published receipts total '
+            f'{point_count} points.'
+        )
     existing_stage_complete = _latest_build_receipt(
         ledger, 'build_stage_tasks_complete'
     )
@@ -1105,6 +1177,7 @@ def complete_macro_v4_batch_build(
         'root_block_count': len(root_ids),
         'published_block_count': len(active_block_ids),
         'point_count': point_count,
+        'canonical_point_count': canonical_count,
         'executor': 'batch',
     }
     if _latest_build_receipt(ledger, 'build_published') is None:
@@ -1321,6 +1394,7 @@ def publish_staged_macro_block(
         return result
 
     details = current.details
+    macros, _ = _macro_v4_batch_block(block_id, ledger, canonical)
     stage_uri = details['stage_uri']
     result = _result_from_details(details, stage_uri=stage_uri)
     if details['schema_sha256'] != _block_schema_hash(canonical):
@@ -1378,14 +1452,16 @@ def publish_staged_macro_block(
     result.publish_logical_tiledb_reads += 1
     if not reconciled and not staged_data.empty:
         write_started = perf_counter()
-        canonical.write(
-            staged_data.drop(columns=['start_time', 'end_time']).rename(
-                columns={'X': 'xi', 'Y': 'yi'}
-            ),
-            config.date,
-        )
+        partitions = _stage_macro_partitions(staged_data, macros)
+        for partition in partitions:
+            canonical.write(
+                partition.drop(columns=['start_time', 'end_time']).rename(
+                    columns={'X': 'xi', 'Y': 'yi'}
+                ),
+                config.date,
+            )
         result.publish_write_seconds = perf_counter() - write_started
-        result.publish_logical_tiledb_writes = 1
+        result.publish_logical_tiledb_writes = len(partitions)
     postcheck_started = perf_counter()
     if _canonical_signature(canonical, staged_data) != actual_signature:
         raise RuntimeError(

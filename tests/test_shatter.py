@@ -82,6 +82,95 @@ def confirm_one_entry(storage, maxy, base, pointcount):
 
 
 class Test_Shatter(object):
+    def test_macro_v4_publisher_preserves_cells_inside_another_blocks_hole(
+        self, shatter_config: ShatterConfig, storage: Storage, tmp_path,
+    ):
+        """A dense write of an L-shaped block must not zero its neighbor."""
+        if storage.config.alignment != 'AlignToCorner':
+            pytest.skip('This regression uses explicit pixel-is-area cores.')
+
+        shatter(shatter_config)
+        source = Storage.from_db(shatter_config.tdb_dir)
+        with source.open('r') as reader:
+            cells = reader.df[:, :]
+        cells = cells[
+            cells.X.isin([0, 1]) & cells.Y.isin([0, 1])
+        ].copy()
+        assert len(cells) == 4
+
+        canonical_uri = (tmp_path / 'irregular-canonical.tdb').as_posix()
+        canonical_config = copy.deepcopy(source.config)
+        canonical_config.tdb_dir = canonical_uri
+        canonical = Storage.create(canonical_config)
+        ledger_uri = (tmp_path / 'irregular-ledger').as_posix()
+        ledger = BuildLedger(ledger_uri)
+        config = copy.deepcopy(shatter_config)
+        config.tdb_dir = canonical_uri
+        config.build_publish_vfs_parallel_ops = 1
+
+        root = canonical.config.root
+        resolution = canonical.config.resolution
+
+        def macro(x, y):
+            return Extents(
+                Bounds(
+                    root.minx + resolution * x,
+                    root.maxy - resolution * (y + 1),
+                    root.minx + resolution * (x + 1),
+                    root.maxy - resolution * y,
+                ),
+                resolution,
+                canonical.config.alignment,
+                root,
+            )
+
+        blocks = [
+            ([macro(1, 1)], cells[(cells.X == 1) & (cells.Y == 1)]),
+            (
+                [macro(0, 0), macro(1, 0), macro(0, 1)],
+                cells[~((cells.X == 1) & (cells.Y == 1))],
+            ),
+        ]
+        expected = int(cells['count'].sum())
+        for index, (macros, block_cells) in enumerate(blocks):
+            block_id = shatter_module._shard_name(macros)
+            stage_uri = (tmp_path / f'irregular-stage-{index}.tdb').as_posix()
+            stage = Storage.create_stage(canonical, stage_uri)
+            stage.write(
+                block_cells.drop(columns=['start_time', 'end_time']),
+                config.date,
+            )
+            _stage, staged = shatter_module._read_populated_stage(stage_uri)
+            ledger.append(
+                block_id, 'planned',
+                **shatter_module._ledger_block_details(
+                    macros, parent_id=None, split_depth=0
+                ),
+            )
+            ledger.append(
+                block_id, 'staged',
+                stage_uri=stage_uri,
+                signature=shatter_module._data_signature(staged),
+                schema_sha256=shatter_module._block_schema_hash(canonical),
+                point_count=int(block_cells['count'].sum()),
+                cell_count=len(block_cells),
+                bounds=shatter_module._block_bounds(macros).get(),
+            )
+            shatter_module.publish_staged_macro_block(
+                block_id, config, ledger_uri
+            )
+
+        with Storage.from_db(canonical_uri).open('r') as reader:
+            actual = reader.query(attrs=['count'], coords=True).df[0:1, 0:1]
+        assert int(actual['count'].sum()) == expected
+        assert shatter_module._canonical_point_count(
+            Storage.from_db(canonical_uri),
+            [macro(0, 0), macro(1, 0), macro(0, 1), macro(1, 1)],
+        ) == expected
+        assert int(actual.loc[(actual.X == 1) & (actual.Y == 1), 'count'].iloc[0]) == (
+            int(cells.loc[(cells.X == 1) & (cells.Y == 1), 'count'].iloc[0])
+        )
+
     def test_batch_and_dask_paths_match_with_identical_processing_cores(
         self,
         shatter_config: ShatterConfig,
@@ -295,6 +384,10 @@ class Test_Shatter(object):
             canonical_uri, config.build_ledger_uri, build_id
         )
         assert result['point_count'] == test_point_count
+        with Storage.from_db(canonical_uri).open('r') as reader:
+            assert int(reader.query(attrs=['count']).df[:, :]['count'].sum()) == (
+                test_point_count
+            )
 
     def test_macro_v4_publish_commit_index_recovers_before_receipt(
         self,
