@@ -19,6 +19,32 @@ class TestMetrics:
         assert np.isclose(l1, 7.0)
         assert np.allclose([l2, l3, l4], 0.0, atol=1e-10)
 
+    def test_l_moments_dense_match_arbitrary_precision_reference(self):
+        values = np.arange(60_000, dtype=np.int64) % 97
+        n = len(values)
+        descending = sorted(values, reverse=True)
+        b0 = sum(int(value) for value in descending) / n
+        b1 = sum(
+            int(value) * (n - index - 1)
+            for index, value in enumerate(descending)
+        ) / (n * (n - 1))
+        b2 = sum(
+            int(value) * (n - index - 1) * (n - index - 2)
+            for index, value in enumerate(descending[:-1])
+        ) / (n * (n - 1) * (n - 2))
+        b3 = sum(
+            int(value) * (n - index - 1) * (n - index - 2)
+            * (n - index - 3)
+            for index, value in enumerate(descending[:-2])
+        ) / (n * (n - 1) * (n - 2) * (n - 3))
+        expected = (
+            b0,
+            2 * b1 - b0,
+            6 * (b2 - b1) + b0,
+            20 * b3 - 30 * b2 + 12 * b1 - b0,
+        )
+        assert np.allclose(lmom4(pd.Series(values)), expected, atol=1e-10)
+
     def test_dag(
         self, metric_data: pd.DataFrame, metric_dag_results: pd.DataFrame
     ):
