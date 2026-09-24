@@ -7,11 +7,18 @@ from silvimetric import l_moments
 from silvimetric.resources.attribute import Attribute
 from silvimetric.resources.taskgraph import Graph
 from silvimetric.resources.attribute import Pdal_Attributes as dims
+from silvimetric.resources.metrics.l_moments import lmom4
 
 from test_shatter import confirm_one_entry
 
 
 class TestMetrics:
+    def test_l_moments_do_not_overflow_dense_cells(self):
+        values = pd.Series(np.full(60_000, 7.0))
+        l1, l2, l3, l4 = lmom4(values)
+        assert np.isclose(l1, 7.0)
+        assert np.allclose([l2, l3, l4], 0.0, atol=1e-10)
+
     def test_dag(
         self, metric_data: pd.DataFrame, metric_dag_results: pd.DataFrame
     ):

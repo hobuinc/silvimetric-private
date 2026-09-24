@@ -8,7 +8,7 @@ def lmom4(data, *args):
     Adapted from https://xiaoganghe.github.io/python-climate-visuals/chapters/data-analytics/scipy-basic.html
     """
 
-    n = data.count()
+    n = int(data.count())
     idx = np.arange(n)
 
     # sort in descending order
@@ -21,7 +21,10 @@ def lmom4(data, *args):
     if n < 2:
         l2 = np.nan
     else:
-        b1 = (data * (n - idx - 1) / n / (n - 1)).sum()
+        # Normalize each factor before multiplication. NumPy's int64
+        # products overflow for dense cells well below a million points.
+        w1 = (n - idx - 1) / (n - 1)
+        b1 = (data * w1).sum() / n
         l2: float = 2 * b1 - b0
 
     if n < 3:
@@ -29,12 +32,8 @@ def lmom4(data, *args):
     else:
         b2_data = data[:-1]
         b2_idx = idx[:-1]
-        b2 = (
-            b2_data
-            * (n - b2_idx - 1)
-            * (n - b2_idx - 2)
-            / (n * (n - 1) * (n - 2))
-        ).sum()
+        w2 = (n - b2_idx - 2) / (n - 2)
+        b2 = (b2_data * w1[:-1] * w2).sum() / n
         l3: float = 6 * (b2 - b1) + b0
 
     if n < 4:
@@ -42,13 +41,8 @@ def lmom4(data, *args):
     else:
         b3_data = b2_data[:-1]
         b3_idx = b2_idx[:-1]
-        b3 = (
-            b3_data
-            * (n - b3_idx - 1)
-            * (n - b3_idx - 2)
-            * (n - b3_idx - 3)
-            / (n * (n - 1) * (n - 2) * (n - 3))
-        ).sum()
+        w3 = (n - b3_idx - 3) / (n - 3)
+        b3 = (b3_data * w1[:-2] * w2[:-1] * w3).sum() / n
         l4: float = 20 * b3 - 30 * b2 + 12 * b1 - b0
 
     return l1, l2, l3, l4
