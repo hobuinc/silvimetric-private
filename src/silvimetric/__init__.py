@@ -33,6 +33,7 @@ from .commands.shatter import (
     publish_macro_v4_batch_block,
     complete_macro_v4_batch_build,
     split_macro_v4_batch_block,
+    presplit_macro_v4_batch_block,
 )
 from .commands.extract import extract
 from .commands.info import info

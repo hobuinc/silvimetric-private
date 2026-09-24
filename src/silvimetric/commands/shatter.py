@@ -1137,6 +1137,81 @@ def split_macro_v4_batch_block(
     )
 
 
+def presplit_macro_v4_batch_block(
+    tdb_dir: str,
+    build_ledger_uri: str,
+    build_id: str | uuid.UUID,
+    block_id: str,
+) -> list[tuple[str, list[Extents], int]]:
+    """Subdivide an unreleased planned Batch leaf before consuming capacity.
+
+    The operator must first claim the leaf in its external control ledger. A
+    durable split receipt precedes child receipts, so a crash between the two
+    can be resumed without changing the plan or duplicating canonical writes.
+    Unlike failure recovery, this does not invent a failed stage attempt.
+    """
+    config, storage, ledger = _macro_v4_batch_config(
+        tdb_dir, build_ledger_uri, build_id
+    )
+    current = ledger.state(block_id)
+    if current is None:
+        raise ValueError(f'No macro-v4 receipt exists for block {block_id!r}.')
+    if current.state == 'split':
+        if current.details.get('failure_kind') != 'capacity_preflight':
+            raise ValueError(f'Block {block_id!r} was split after a stage failure.')
+        child_records = current.details['children']
+        children = [
+            _block_from_descriptor(record['macro_bounds'], storage)
+            for record in child_records
+        ]
+        split_depth = int(current.details['split_depth'])
+    else:
+        if current.state != 'planned':
+            raise ValueError(
+                f'Block {block_id!r} is {current.state!r}, not an unreleased plan.'
+            )
+        macros, split_depth = _macro_v4_batch_block(block_id, ledger, storage)
+        if split_depth >= config.build_max_split_depth:
+            raise ValueError(f'Block {block_id!r} is at its maximum split depth.')
+        children = split_macro_block_once(macros, config)
+        if not children:
+            raise ValueError(f'Block {block_id!r} cannot be subdivided further.')
+        child_records = [
+            {
+                'block_id': _shard_name(child),
+                'macro_bounds': _block_descriptor(child),
+                'bounds': _block_bounds(child).get(),
+                'split_depth': split_depth + 1,
+            }
+            for child in children
+        ]
+        if block_id in {record['block_id'] for record in child_records} or len(
+            {record['block_id'] for record in child_records}
+        ) != len(child_records):
+            raise RuntimeError(f'Preflight split of {block_id!r} is not disjoint.')
+        ledger.append(
+            block_id,
+            'split',
+            failure_kind='capacity_preflight',
+            split_depth=split_depth,
+            children=child_records,
+        )
+
+    for child, record in zip(children, child_records):
+        if ledger.state(record['block_id']) is None:
+            ledger.append(
+                record['block_id'],
+                'planned',
+                **_ledger_block_details(
+                    child, parent_id=block_id, split_depth=split_depth + 1
+                ),
+            )
+    return [
+        (record['block_id'], child, split_depth + 1)
+        for record, child in zip(child_records, children)
+    ]
+
+
 def stage_macro_block(
     macros: list[Extents],
     config: ShatterConfig,

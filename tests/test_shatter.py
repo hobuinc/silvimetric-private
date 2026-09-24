@@ -235,6 +235,67 @@ class Test_Shatter(object):
         ].sum()
         assert int(point_count) == test_point_count
 
+    def test_macro_v4_batch_preflight_split_is_resumable(
+        self, shatter_config: ShatterConfig, storage: Storage,
+        test_point_count: int, tmp_path,
+    ):
+        canonical_uri = (tmp_path / 'preflight.tdb').as_posix()
+        storage_config = copy.deepcopy(storage.config)
+        storage_config.tdb_dir = canonical_uri
+        Storage.create(storage_config)
+        build_id = uuid.uuid4()
+        config = ShatterConfig(
+            name=build_id,
+            tdb_dir=canonical_uri,
+            filename=shatter_config.filename,
+            bounds=shatter_config.bounds,
+            date=shatter_config.date,
+            tile_size=1,
+            read_group_size=4,
+            processing_halo_m=shatter_config.processing_halo_m,
+            processing_strategy='macro-v4-staged-publish',
+            stage_shard_side_macros=2,
+            stage_fragment_size_mb=1,
+            build_stage_uri=(tmp_path / 'preflight-stages').as_posix(),
+            build_ledger_uri=(tmp_path / 'preflight-ledger').as_posix(),
+            build_publish_concurrency=1,
+            build_publish_vfs_parallel_ops=1,
+            build_stage_vfs_parallel_ops=1,
+        )
+        plan = shatter_module.plan_macro_v4_staged_build(config)
+        ledger = BuildLedger(config.build_ledger_uri)
+        block_id = next(
+            block for block in plan.active_block_ids
+            if len(shatter_module._macro_v4_batch_block(
+                block, ledger, Storage.from_db(canonical_uri)
+            )[0]) > 1
+        )
+        args = (canonical_uri, config.build_ledger_uri, build_id, block_id)
+        children = shatter_module.presplit_macro_v4_batch_block(*args)
+        assert len(children) > 1
+        assert [child[0] for child in children] == [
+            child[0] for child in shatter_module.presplit_macro_v4_batch_block(*args)
+        ]
+        assert [record.state for record in ledger.records(block_id)] == [
+            'planned', 'split'
+        ]
+        resumed = shatter_module.plan_macro_v4_staged_build(
+            ShatterConfig.from_string(str(config))
+        )
+        assert block_id not in resumed.active_block_ids
+        assert {child[0] for child in children} <= set(resumed.active_block_ids)
+        for leaf_id in resumed.active_block_ids:
+            shatter_module.stage_macro_v4_batch_block(
+                canonical_uri, config.build_ledger_uri, build_id, leaf_id
+            )
+            shatter_module.publish_macro_v4_batch_block(
+                canonical_uri, config.build_ledger_uri, build_id, leaf_id
+            )
+        result = shatter_module.complete_macro_v4_batch_build(
+            canonical_uri, config.build_ledger_uri, build_id
+        )
+        assert result['point_count'] == test_point_count
+
     def test_macro_v4_publish_commit_index_recovers_before_receipt(
         self,
         shatter_config: ShatterConfig,
