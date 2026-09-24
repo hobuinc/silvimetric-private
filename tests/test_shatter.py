@@ -445,6 +445,9 @@ class Test_Shatter(object):
         assert shatter_module._stage_failure_kind(KilledWorker()) == (
             'worker_lost_after_retries'
         )
+        assert shatter_module._stage_failure_kind(
+            TimeoutError('Job attempt duration exceeded timeout')
+        ) == 'time_limit'
 
     def test_adaptive_planner_splits_the_historic_becker_memory_shape(
         self,

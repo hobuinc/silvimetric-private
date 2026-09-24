@@ -1925,12 +1925,15 @@ def _stage_failure_kind(error: object) -> str:
 
     A Dask nanny can kill the entire worker process, so the Python task often
     cannot raise ``MemoryError`` itself.  Dask reports that condition as a
-    ``KilledWorker`` failure after its configured retries.  Splitting that
+    ``KilledWorker`` failure after its configured retries.  Batch may also
+    kill a valid but oversized work unit at its time limit. Splitting either
     block is safe because it has no durable stage receipt yet; ordinary
     application errors remain resumable but are not silently subdivided.
     """
     error_type = type(error).__name__
     text = f'{error_type}: {error}'.lower()
+    if isinstance(error, TimeoutError) or 'attempt duration exceeded timeout' in text:
+        return 'time_limit'
     if isinstance(error, MemoryError) or 'memory' in text or 'nanny' in text:
         return 'memory_pressure'
     if 'killedworker' in text or 'worker died' in text:
@@ -2023,7 +2026,7 @@ def _split_failed_stage_block(
         error=str(error)[:2000],
         split_depth=split_depth,
     )
-    if kind not in {'memory_pressure', 'worker_lost_after_retries'}:
+    if kind not in {'memory_pressure', 'worker_lost_after_retries', 'time_limit'}:
         return []
     if split_depth >= config.build_max_split_depth:
         return []
