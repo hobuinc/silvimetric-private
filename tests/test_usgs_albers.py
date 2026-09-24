@@ -23,6 +23,7 @@ from silvimetric import (
     shatter,
 )
 from silvimetric.commands.extract import extract
+from silvimetric.commands.shatter import get_data
 from silvimetric.resources.config import ExtractConfig
 from silvimetric.resources.metrics.grid_metrics import get_grid_metrics
 from silvimetric.resources.usgs_albers import (
@@ -120,6 +121,44 @@ def test_profile_reprojects_source_and_keeps_origin_based_pixel_indices(
     )
     assert np.all(np.floor(output['xi'][:128]) >= 0)
     assert np.all(np.floor(output['yi'][:128]) >= 0)
+
+
+def test_profile_shatter_uses_floor_for_pixel_area_rows(autzen_filepath, tmp_path):
+    """A shatter read must not move each Albers point one raster row south."""
+    config = _profile_config(tmp_path / 'profile.tdb')
+    storage = Storage.create(config)
+    extent = Extents(
+        copy.deepcopy(WINDOW_A), config.resolution, config.alignment, config.root
+    )
+
+    points = get_data(extent, autzen_filepath, storage, reader_collar=20)
+    source = Data(
+        autzen_filepath, storage.config, bounds=extent.bounds, reader_collar=20
+    )
+    source.execute()
+    raw = source.pipeline.get_dataframe(0)
+    raw = raw.loc[
+        (raw.Y < extent.bounds.maxy)
+        & (raw.Y >= extent.bounds.miny)
+        & (raw.X >= extent.bounds.minx)
+        & (raw.X < extent.bounds.maxx)
+    ]
+    assert len(points) == len(raw) > 0
+    # COPC may emit the same points in a different order on two reads.
+    actual, actual_counts = np.unique(
+        points[['xi', 'yi']].to_numpy(dtype=np.int32),
+        axis=0,
+        return_counts=True,
+    )
+    expected, expected_counts = np.unique(
+        np.column_stack((np.floor(raw['xi']), np.floor(raw['yi']))).astype(
+            np.int32
+        ),
+        axis=0,
+        return_counts=True,
+    )
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(actual_counts, expected_counts)
 
 
 def test_profile_falls_back_when_pyproj_returns_nonfinite_bounds(monkeypatch):

@@ -194,8 +194,15 @@ def get_data(
     points = points.loc[points.X < extents.bounds.maxx][attrs]
 
     points.loc[:, 'xi'] = np.floor(points.xi).astype(np.int32)
-    # ceil for y because origin is at top left
-    points.loc[:, 'yi'] = np.ceil(points.yi).astype(np.int32)
+    # The USGS Albers root is the upper *outer edge* of pixel row zero, so
+    # both pixel coordinates use floor.  The older centre-aligned layout
+    # retains its historical ceil conversion for backwards compatibility.
+    y_indices = (
+        np.floor(points.yi)
+        if storage.config.usgs_albers
+        else np.ceil(points.yi)
+    )
+    points.loc[:, 'yi'] = y_indices.astype(np.int32)
 
     return points
 
