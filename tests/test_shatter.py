@@ -1329,6 +1329,21 @@ class Test_Shatter(object):
             test_point_count
         )
         assert finalized.execution_timing['array']['fragment_count_before'] >= 1
+        phases = finalized.execution_timing['array']['finalization_phases_seconds']
+        assert all(
+            phase in phases and phases[phase] >= 0
+            for phase in (
+                'fragment_consolidate', 'fragment_vacuum',
+                'fragment_meta_consolidate', 'fragment_meta_vacuum',
+                'commits_consolidate', 'commits_vacuum',
+                'array_meta_consolidate', 'array_meta_vacuum',
+                'ledger_root_blocks', 'canonical_count_scan',
+                'seal_receipt', 'seal_metadata',
+            )
+        )
+        assert ledger.state('__build__').details[
+            'finalization_phases_seconds'
+        ]['canonical_count_scan'] >= 0
         point_count = Storage.from_db(staged_dir).open('r').df[:, :][
             'count'
         ].sum()

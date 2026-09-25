@@ -2772,6 +2772,9 @@ def _seal_macro_v4_staged_build(
                 'fragment_bytes'
             ),
             'consolidation_skipped': True,
+            'finalization_phases_seconds': prior_build_state.details.get(
+                'finalization_phases_seconds', {}
+            ),
         }
         return config.point_count
 
@@ -2782,7 +2785,21 @@ def _seal_macro_v4_staged_build(
             'build_published receipt. Resume the build phase first.'
         )
     config.point_count = int(published.details['point_count'])
-    fragments_before = storage.stage_fragment_summary()
+    phases: dict[str, float] = {}
+
+    def timed(phase: str, operation):
+        started = perf_counter()
+        try:
+            return operation()
+        finally:
+            # Record even a failed operation so an interrupted seal can be
+            # diagnosed without treating the attempt as a successful seal.
+            phases[phase] = round(perf_counter() - started, 6)
+
+    finalization_started = perf_counter()
+    fragments_before = timed(
+        'fragment_summary_before', storage.stage_fragment_summary
+    )
     ledger.append(
         '__build__',
         'build_consolidating',
@@ -2790,17 +2807,28 @@ def _seal_macro_v4_staged_build(
         fragment_count=len(fragments_before),
         published_block_count=published.details['published_block_count'],
     )
-    consolidation_started = perf_counter()
     try:
-        storage.consolidate_canonical_array(config.stage_fragment_size_mb)
-        storage.vacuum()
+        timed(
+            'fragment_consolidate',
+            lambda: storage.consolidate_canonical_array(
+                config.stage_fragment_size_mb
+            ),
+        )
+        timed('fragment_vacuum', storage.vacuum)
         for mode in ['fragment_meta', 'commits', 'array_meta']:
-            storage.consolidate(mode)
-            storage.vacuum(mode)
-        fragments_after = storage.stage_fragment_summary()
-        root_blocks = _macro_v4_root_blocks(ledger, storage)
-        canonical_count = _canonical_point_count(
-            storage, [macro for block in root_blocks.values() for macro in block]
+            timed(f'{mode}_consolidate', lambda mode=mode: storage.consolidate(mode))
+            timed(f'{mode}_vacuum', lambda mode=mode: storage.vacuum(mode))
+        fragments_after = timed(
+            'fragment_summary_after', storage.stage_fragment_summary
+        )
+        root_blocks = timed(
+            'ledger_root_blocks', lambda: _macro_v4_root_blocks(ledger, storage)
+        )
+        canonical_count = timed(
+            'canonical_count_scan',
+            lambda: _canonical_point_count(
+                storage, [macro for block in root_blocks.values() for macro in block]
+            ),
         )
         if canonical_count != config.point_count:
             raise RuntimeError(
@@ -2817,6 +2845,7 @@ def _seal_macro_v4_staged_build(
                 'build_partial',
                 build_id=str(config.name),
                 phase='finalization',
+                finalization_phases_seconds=phases,
                 reason=type(error).__name__,
                 message=str(error),
             )
@@ -2836,10 +2865,14 @@ def _seal_macro_v4_staged_build(
         'canonical_point_count': canonical_count,
         'fragment_count': len(fragments_after),
         'fragment_bytes': sum(fragment['bytes'] for fragment in fragments_after),
+        'finalization_phases_seconds': phases,
     }
-    ledger.append('__build__', 'build_sealed', **seal)
-    storage.save_metadata(
-        f'macro_v4_build_{config.name}', json.dumps(seal, sort_keys=True)
+    timed('seal_receipt', lambda: ledger.append('__build__', 'build_sealed', **seal))
+    timed(
+        'seal_metadata',
+        lambda: storage.save_metadata(
+            f'macro_v4_build_{config.name}', json.dumps(seal, sort_keys=True)
+        ),
     )
     config.execution_timing['array'] = {
         'fragment_target_mb': config.stage_fragment_size_mb,
@@ -2852,8 +2885,9 @@ def _seal_macro_v4_staged_build(
             fragment['bytes'] for fragment in fragments_after
         ),
         'consolidation_seconds': round(
-            perf_counter() - consolidation_started, 6
+            perf_counter() - finalization_started, 6
         ),
+        'finalization_phases_seconds': phases,
     }
     return config.point_count
 
