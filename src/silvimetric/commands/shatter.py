@@ -1051,9 +1051,6 @@ def plan_macro_v4_staged_build(config: ShatterConfig) -> MacroV4BatchPlan:
                     'cannot safely resume this canonical-array build.'
                 )
             config.time_slot = int(original_time_slot)
-        if not config.time_slot:
-            config.time_slot = storage.reserve_time_slot()
-
     leaf_size = storage.config.ysize * storage.config.xsize
     potential_leaves = extents.get_root_aligned_leaf_children(leaf_size)
     macros = [
@@ -1064,6 +1061,10 @@ def plan_macro_v4_staged_build(config: ShatterConfig) -> MacroV4BatchPlan:
         )
     ]
     macro_blocks, planner = plan_macro_blocks(macros, config, storage, data)
+    # A transient source/planner failure must not consume a canonical history
+    # slot. Reserve only after the bounded plan has actually completed.
+    if not config.time_slot:
+        config.time_slot = storage.reserve_time_slot()
     root_blocks = {_shard_name(block): block for block in macro_blocks}
     if len(root_blocks) != len(macro_blocks):
         raise RuntimeError('Macro-v4 planner produced non-unique block IDs.')
@@ -3138,6 +3139,7 @@ def plan_macro_blocks(
         'native_sample_seconds': 0.0,
         'coarse_query_calls': 0,
         'coarse_query_seconds': 0.0,
+        'coarse_queries_skipped_by_density': 0,
     }
 
     def report_progress(phase: str) -> None:
@@ -3273,7 +3275,6 @@ def plan_macro_blocks(
             bounds.maxx + collar,
             bounds.maxy + collar,
         )
-        sample = coarse_count(query_bounds)
         query_area = (query_bounds.maxx - query_bounds.minx) * (
             query_bounds.maxy - query_bounds.miny
         )
@@ -3321,8 +3322,18 @@ def plan_macro_blocks(
                 for observation in applicable_samples
             ),
         ) * config.stage_planner_density_safety_factor
-        coarse_estimate = int(math.ceil(sample * local_multiplier))
         density_estimate = int(math.ceil(query_area * local_density))
+        # The conservative density estimate already selects a split for this
+        # candidate. Reading a very large EPT hierarchy just to reach the
+        # same decision is unnecessary and can fail on wide source queries.
+        # Every eventual under-target leaf still receives a bounded coarse read.
+        if density_estimate > target:
+            sample = None
+            coarse_estimate = None
+            query_timing['coarse_queries_skipped_by_density'] += 1
+        else:
+            sample = coarse_count(query_bounds)
+            coarse_estimate = int(math.ceil(sample * local_multiplier))
         details = {
             'name': name,
             'macro_count': len(block),
@@ -3330,7 +3341,8 @@ def plan_macro_blocks(
             'quickinfo_points': sample,
             'estimated_coarse_raw_points': coarse_estimate,
             'estimated_density_raw_points': density_estimate,
-            'estimated_max_points': max(coarse_estimate, density_estimate),
+            'estimated_max_points': max(coarse_estimate or 0, density_estimate),
+            'coarse_query_skipped_by_density': sample is None,
             'local_calibration_samples': local_samples,
             'inherited_local_density_observations': len(inherited_samples),
             'local_point_multiplier': local_multiplier,

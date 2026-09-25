@@ -1,8 +1,36 @@
+import pytest
+
 from silvimetric import Data, Bounds
 from silvimetric.resources.config import StorageConfig
 
 
 class Test_Data(object):  # noqa: D101
+    def test_bounded_density_failure_reports_query_context(
+        self, no_cell_line_path: str, storage_config: StorageConfig,
+        monkeypatch,
+    ):
+        class FailedPipeline:
+            def execute(self):
+                raise RuntimeError('source fetch failed')
+
+        class Reader:
+            type = 'readers.ept'
+
+            def __init__(self):
+                self._options = {}
+
+            def pipeline(self):
+                return FailedPipeline()
+
+        data = Data(no_cell_line_path, storage_config)
+        monkeypatch.setattr(data, 'get_reader', lambda: Reader())
+        bounds = Bounds(1, 2, 3, 4)
+        with pytest.raises(RuntimeError, match='source fetch failed') as error:
+            data.estimate_count(bounds, reader_resolution=160)
+        assert 'target_bounds=[1.0, 2.0, 3.0, 4.0]' in str(error.value)
+        assert 'reader_bounds=[1.0, 2.0, 3.0, 4.0]' in str(error.value)
+        assert 'resolution=160' in str(error.value)
+
     def test_ept_reader_ignores_unreadable_tiles(self):
         """EPT source transport errors must not abort an entire shatter run."""
 

@@ -520,11 +520,8 @@ class Data:
         if reader_resolution is not None:
             if reader_resolution <= 0:
                 raise ValueError('reader_resolution must be positive')
-        self._apply_query_options(
-            reader,
-            self._reader_bounds(bounds) if bounds is not None else None,
-            reader_resolution,
-        )
+        reader_bounds = self._reader_bounds(bounds) if bounds is not None else None
+        self._apply_query_options(reader, reader_bounds, reader_resolution)
 
         pipeline = reader.pipeline()
         if reader_resolution is None:
@@ -538,7 +535,15 @@ class Data:
         # reader resolution.  Unlike quickinfo, executing the bounded reader
         # causes COPC/EPT to select only the requested low-resolution nodes,
         # and the returned array count is therefore window-specific.
-        pipeline.execute()
+        try:
+            pipeline.execute()
+        except RuntimeError as error:
+            raise RuntimeError(
+                f'{reader.type} bounded density query failed: '
+                f'target_bounds={bounds.get() if bounds is not None else None}, '
+                f'reader_bounds={reader_bounds.get() if reader_bounds is not None else None}, '
+                f'resolution={reader_resolution}. {error}'
+            ) from error
         if not pipeline.arrays:
             return 0
         return len(pipeline.arrays[0])

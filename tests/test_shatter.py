@@ -366,6 +366,31 @@ class Test_Shatter(object):
         ].sum()
         assert int(point_count) == test_point_count
 
+    def test_macro_v4_failed_planner_does_not_consume_history_slot(
+        self, shatter_config: ShatterConfig, storage: Storage, tmp_path,
+        monkeypatch,
+    ):
+        canonical_uri = (tmp_path / 'failed-plan.tdb').as_posix()
+        staged_storage_config = copy.deepcopy(storage.config)
+        staged_storage_config.tdb_dir = canonical_uri
+        Storage.create(staged_storage_config)
+        before = Storage.from_db(canonical_uri).config.next_time_slot
+        config = ShatterConfig(
+            name=uuid.uuid4(), tdb_dir=canonical_uri,
+            filename=shatter_config.filename, bounds=shatter_config.bounds,
+            date=shatter_config.date, tile_size=1, read_group_size=4,
+            processing_strategy='macro-v4-staged-publish',
+            build_stage_uri=(tmp_path / 'failed-stage').as_posix(),
+            build_ledger_uri=(tmp_path / 'failed-ledger').as_posix(),
+        )
+        monkeypatch.setattr(
+            shatter_module, 'plan_macro_blocks',
+            lambda *_args: (_ for _ in ()).throw(RuntimeError('source query failed')),
+        )
+        with pytest.raises(RuntimeError, match='source query failed'):
+            shatter_module.plan_macro_v4_staged_build(config)
+        assert Storage.from_db(canonical_uri).config.next_time_slot == before
+
     def test_macro_v4_batch_preflight_split_is_resumable(
         self, shatter_config: ShatterConfig, storage: Storage,
         test_point_count: int, tmp_path,
@@ -583,6 +608,53 @@ class Test_Shatter(object):
         assert planner['query_timing']['coarse_query_calls'] > 0
         assert planner['planner_wall_seconds'] >= 0
         assert len(planner['input_processing_grid_sha256']) == 64
+
+    def test_density_bound_skips_wide_ept_hierarchy_query(
+        self, shatter_config: ShatterConfig, storage: Storage
+    ):
+        """A candidate known to need splitting never reads its wide EPT bounds."""
+
+        class BoundedData:
+            def __init__(self):
+                self.coarse_areas = []
+
+            def count(self, bounds):
+                return int((bounds.maxx - bounds.minx) *
+                           (bounds.maxy - bounds.miny) / 100)
+
+            def estimate_count(self, bounds, reader_resolution=None):
+                area = (bounds.maxx - bounds.minx) * (
+                    bounds.maxy - bounds.miny
+                )
+                self.coarse_areas.append(area)
+                if area > 5000:
+                    raise AssertionError('wide EPT hierarchy read was unnecessary')
+                return int(area / 100)
+
+        shatter_config.tile_size = 1
+        shatter_config.read_group_size = 4
+        shatter_config.processing_strategy = 'macro-v3-stage-push'
+        shatter_config.stage_tdb_dir = '/private/tmp/stage.tdb'
+        shatter_config.stage_publish_uri = '/private/tmp/published.tdb'
+        shatter_config.stage_shard_target_points = 40
+        shatter_config.stage_planner_resolution_multiple = 2
+        shatter_config.stage_planner_calibration_window_m = 50
+        shatter_config.stage_planner_local_calibration_window_m = 50
+        shatter_config.processing_halo_m = 0
+        root = Extents(
+            storage.config.root,
+            storage.config.resolution,
+            storage.config.alignment,
+            storage.config.root,
+        )
+        data = BoundedData()
+        blocks, planner = plan_macro_blocks(
+            root.get_leaf_children(shatter_config.read_group_size),
+            shatter_config, storage, data,
+        )
+        assert len(blocks) > 1
+        assert planner['query_timing']['coarse_queries_skipped_by_density'] > 0
+        assert data.coarse_areas and max(data.coarse_areas) <= 5000
 
     def test_adaptive_planner_subdivides_an_over_limit_singleton_macro(
         self,
