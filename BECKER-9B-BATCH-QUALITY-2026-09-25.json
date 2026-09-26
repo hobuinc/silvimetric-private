@@ -1,0 +1,154 @@
+{
+  "build_id": "01702520-0d3e-41e4-9128-dc8b6fa0b133",
+  "canonical_uri": "s3://sm-becker-056176271256-c0f24425-9fcc-4464-a7fe-820ebeb7e8be/db/batch-v4-albers-yx-row-01702520",
+  "dense_cell": {
+    "indices": [
+      126316,
+      32425
+    ],
+    "points": 152068,
+    "recomputed_l4": -0.5145334374819193,
+    "recomputed_lkurtosis": -0.09920740297762376,
+    "recomputed_mean": 11.526755596180655,
+    "stored_l4": -0.5145334601402283,
+    "stored_lkurtosis": -0.09920740127563477,
+    "stored_mean": 11.526755332946777
+  },
+  "footprint_indices": [
+    125639,
+    31979,
+    127277,
+    32463
+  ],
+  "ledger_uri": "s3://sm-becker-056176271256-c0f24425-9fcc-4464-a7fe-820ebeb7e8be/builds/01702520-0d3e-41e4-9128-dc8b6fa0b133/ledger",
+  "overlapping_stage_cells": 0,
+  "point_count": 8524575503,
+  "populated_cells": 750637,
+  "published_stages": 294,
+  "status": "passed",
+  "windows": {
+    "boundary": {
+      "extract": [
+        {
+          "attribute": "m_Z_mean",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_l4",
+          "cells": 64,
+          "matching": true
+        }
+      ],
+      "gdal": [
+        {
+          "attribute": "count",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_mean",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_l4",
+          "cells": 64,
+          "matching": true
+        }
+      ],
+      "indices": [
+        126907,
+        31979,
+        126915,
+        31987
+      ],
+      "populated_cells": 48,
+      "stage_metric_matches": [
+        "m_Z_mean",
+        "m_Z_p95",
+        "m_Z_l4",
+        "m_Z_lkurtosis",
+        "m_Intensity_mean"
+      ]
+    },
+    "dense": {
+      "extract": [
+        {
+          "attribute": "m_Z_mean",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_l4",
+          "cells": 64,
+          "matching": true
+        }
+      ],
+      "gdal": [
+        {
+          "attribute": "count",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_mean",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_l4",
+          "cells": 64,
+          "matching": true
+        }
+      ],
+      "indices": [
+        126312,
+        32421,
+        126320,
+        32429
+      ],
+      "populated_cells": 64,
+      "stage_metric_matches": [
+        "m_Z_mean",
+        "m_Z_p95",
+        "m_Z_l4",
+        "m_Z_lkurtosis",
+        "m_Intensity_mean"
+      ]
+    },
+    "edge": {
+      "gdal": [
+        {
+          "attribute": "count",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_mean",
+          "cells": 64,
+          "matching": true
+        },
+        {
+          "attribute": "m_Z_l4",
+          "cells": 64,
+          "matching": true
+        }
+      ],
+      "indices": [
+        127146,
+        31979,
+        127154,
+        31987
+      ],
+      "populated_cells": 60,
+      "stage_metric_matches": [
+        "m_Z_mean",
+        "m_Z_p95",
+        "m_Z_l4",
+        "m_Z_lkurtosis",
+        "m_Intensity_mean"
+      ]
+    }
+  }
+}
