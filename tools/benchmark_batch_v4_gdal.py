@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import sys
@@ -32,7 +33,9 @@ def named_attribute_uri(canonical_uri: str, attribute: str) -> str:
     parsed = urlparse(canonical_uri)
     if parsed.scheme != 's3' or not parsed.netloc or not parsed.path.strip('/'):
         raise ValueError('Canonical URI must be an s3://bucket/array URI.')
-    if not attribute or not attribute.replace('_', '').isalnum():
+    # FUSION-aligned metric names include ``Strata-1``. Keep URI delimiters
+    # and path syntax excluded while accepting that legitimate hyphen.
+    if re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_-]*', attribute) is None:
         raise ValueError(f'Invalid TileDB attribute: {attribute!r}')
     return f'TILEDB:/vsis3/{parsed.netloc}{parsed.path.rstrip("/")}:{attribute}'
 
