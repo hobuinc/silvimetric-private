@@ -341,6 +341,16 @@ def initialize_cmd(
     help='Explicitly use a legacy source-CRS database.',
 )
 @click.option(
+    '--water-mask-uri',
+    type=str,
+    default=None,
+    help=(
+        'Public HTTPS, S3, or local URI of a 20 m EPSG:5070 pixel-is-area '
+        'water COG. Pixels marked water are omitted before all statistics and '
+        'attributes; requires a USGS Albers database.'
+    ),
+)
+@click.option(
     '--tilesize',
     type=int,
     default=None,
@@ -529,6 +539,7 @@ def shatter_cmd(
     pointcloud,
     bounds,
     usgs_albers,
+    water_mask_uri,
     report,
     tilesize,
     processing_strategy,
@@ -585,6 +596,7 @@ def shatter_cmd(
         filename=pointcloud,
         bounds=bounds,
         usgs_albers=usgs_albers,
+        water_mask_uri=water_mask_uri,
         tile_size=tilesize,
         processing_strategy=processing_strategy,
         read_group_size=read_group_size,

@@ -153,6 +153,7 @@ def get_data(
     filename: str,
     storage: Storage,
     reader_collar: float | None = None,
+    water_mask_uri: str | None = None,
 ) -> pd.DataFrame:
     """
     Execute pipeline and retrieve point cloud data for this extent
@@ -203,6 +204,18 @@ def get_data(
         else np.ceil(points.yi)
     )
     points.loc[:, 'yi'] = y_indices.astype(np.int32)
+
+    if water_mask_uri and not points.empty:
+        from ..resources.water_mask import omit_water_pixels
+
+        if not storage.config.usgs_albers:
+            raise ValueError('water mask requires USGS Albers storage')
+        points = omit_water_pixels(
+            points, water_mask_uri,
+            root_x=storage.config.root.minx,
+            root_y=storage.config.root.maxy,
+            resolution=storage.config.resolution,
+        )
 
     return points
 
@@ -301,7 +314,9 @@ def do_one(
     if config.mbr:
         if not all(leaf.disjoint_by_mbr(m) for m in config.mbr):
             return None
-    points = get_data(leaf, config.filename, storage)
+    points = get_data(
+        leaf, config.filename, storage, water_mask_uri=config.water_mask_uri
+    )
     if points.empty:
         return None
     listed_data = agg_list(points, config.time_slot)
@@ -334,6 +349,7 @@ def do_macro(
         config.filename,
         storage,
         reader_collar=config.processing_halo_m,
+        water_mask_uri=config.water_mask_uri,
     )
     read_seconds = perf_counter() - phase_started
     if points.empty:
@@ -910,6 +926,7 @@ def _build_inputs(
         'tile_size': config.tile_size,
         'read_group_size': config.read_group_size,
         'processing_halo_m': config.processing_halo_m,
+        'water_mask_uri': config.water_mask_uri,
         'block_ids': block_ids,
     }
 
@@ -1655,6 +1672,7 @@ def do_macro_to_stage(
         config.filename,
         storage,
         reader_collar=config.processing_halo_m,
+        water_mask_uri=config.water_mask_uri,
     )
     read_seconds = perf_counter() - phase_started
     if points.empty:

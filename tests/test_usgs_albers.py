@@ -10,6 +10,7 @@ import numpy as np
 import pdal
 import pyproj
 import tiledb
+from osgeo import gdal, osr
 
 from silvimetric import (
     Attributes,
@@ -23,7 +24,7 @@ from silvimetric import (
     shatter,
 )
 from silvimetric.commands.extract import extract
-from silvimetric.commands.shatter import get_data
+from silvimetric.commands.shatter import agg_list, get_data, run_graph
 from silvimetric.resources.config import ExtractConfig
 from silvimetric.resources.metrics.grid_metrics import get_grid_metrics
 from silvimetric.resources.usgs_albers import (
@@ -159,6 +160,84 @@ def test_profile_shatter_uses_floor_for_pixel_area_rows(autzen_filepath, tmp_pat
     )
     np.testing.assert_array_equal(actual, expected)
     np.testing.assert_array_equal(actual_counts, expected_counts)
+
+
+def test_shatter_water_mask_omits_a_populated_pixel_before_aggregation(
+    autzen_filepath, tmp_path
+):
+    """The mask eliminates point attributes as well as derived statistics."""
+    config = _profile_config(tmp_path / 'profile-water.tdb')
+    storage = Storage.create(config)
+    extent = Extents(
+        copy.deepcopy(WINDOW_A), config.resolution, config.alignment, config.root
+    )
+    unmasked = get_data(extent, autzen_filepath, storage, reader_collar=20)
+    counts = unmasked.groupby(['xi', 'yi']).size()
+    water_col, water_row = (int(value) for value in counts.idxmax())
+    col_min, col_max = int(unmasked.xi.min()), int(unmasked.xi.max())
+    row_min, row_max = int(unmasked.yi.min()), int(unmasked.yi.max())
+    pixels = np.zeros((row_max - row_min + 1, col_max - col_min + 1), dtype='u1')
+    pixels[water_row - row_min, water_col - col_min] = 1
+    mask_uri = str(tmp_path / 'water.tif')
+    raster = gdal.GetDriverByName('GTiff').Create(
+        mask_uri, pixels.shape[1], pixels.shape[0], 1, gdal.GDT_Byte
+    )
+    raster.SetGeoTransform((
+        config.root.minx + col_min * 20, 20, 0,
+        config.root.maxy - row_min * 20, 0, -20,
+    ))
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(5070)
+    raster.SetProjection(srs.ExportToWkt())
+    raster.SetMetadataItem('AREA_OR_POINT', 'Area')
+    raster.GetRasterBand(1).SetNoDataValue(255)
+    raster.GetRasterBand(1).WriteArray(pixels)
+    raster = None
+
+    masked = get_data(
+        extent, autzen_filepath, storage, reader_collar=20,
+        water_mask_uri=mask_uri,
+    )
+    assert len(masked) == len(unmasked) - int(counts.loc[water_col, water_row])
+    assert not ((masked.xi == water_col) & (masked.yi == water_row)).any()
+    assert set(masked.columns) == set(unmasked.columns)
+    assert (water_col, water_row) not in agg_list(masked, 0).index
+    assert (water_col, water_row) not in run_graph(
+        masked, storage.get_metrics()
+    ).index
+
+    shatter_config = ShatterConfig(
+        tdb_dir=storage.config.tdb_dir,
+        filename=autzen_filepath,
+        date=datetime(2020, 1, 1),
+        bounds=copy.deepcopy(WINDOW_A),
+        tile_size=64,
+        usgs_albers=True,
+        water_mask_uri=mask_uri,
+        log=Log('INFO'),
+    )
+    assert ShatterConfig.from_string(str(shatter_config)) == shatter_config
+    assert shatter(shatter_config) == len(masked)
+    assert Storage.from_db(storage.config.tdb_dir).get_history()[-1][
+        'water_mask_uri'
+    ] == mask_uri
+
+    output = tmp_path / 'masked-extract'
+    extract(ExtractConfig(
+        tdb_dir=storage.config.tdb_dir,
+        out_dir=str(output),
+        bounds=copy.deepcopy(WINDOW_A),
+        log=Log('INFO'),
+    ))
+    raster = gdal.Open(str(output / 'm_Z_mean.tif'))
+    gt = raster.GetGeoTransform()
+    x_center = config.root.minx + (water_col + 0.5) * RESOLUTION
+    y_center = config.root.maxy - (water_row + 0.5) * RESOLUTION
+    raster_col = int((x_center - gt[0]) / gt[1])
+    raster_row = int((y_center - gt[3]) / gt[5])
+    band = raster.GetRasterBand(1)
+    pixel = band.ReadAsArray(raster_col, raster_row, 1, 1)[0, 0]
+    assert np.isnan(pixel) or pixel == band.GetNoDataValue()
 
 
 def test_profile_falls_back_when_pyproj_returns_nonfinite_bounds(monkeypatch):

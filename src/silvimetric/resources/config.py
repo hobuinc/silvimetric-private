@@ -285,6 +285,8 @@ class ShatterConfig(Config):
     """The bounding box of the shatter process., defaults to None"""
     usgs_albers: bool = field(default=False)
     """Require and use the canonical USGS Albers storage-grid profile."""
+    water_mask_uri: Union[str, None] = field(default=None)
+    """Aligned 20 m water-mask COG; water pixels are omitted before metrics."""
     name: uuid.UUID = field(default=uuid.uuid4())
     """UUID representing this shatter process and will be generated if not
     provided., defaults to uuid.uuid()"""
@@ -427,6 +429,8 @@ class ShatterConfig(Config):
 
         if self.processing_halo_m is not None and self.processing_halo_m < 0:
             raise ValueError('processing_halo_m must be non-negative')
+        if self.water_mask_uri and not self.usgs_albers:
+            raise ValueError('water_mask_uri requires the USGS Albers profile')
 
         if self.processing_strategy in {
             'macro-v2',
@@ -585,6 +589,7 @@ class ShatterConfig(Config):
             time_slot=self.time_slot,
             bounds=self.bounds.to_json(),
             usgs_albers=self.usgs_albers,
+            water_mask_uri=self.water_mask_uri,
             date=date,
             processing_strategy=self.processing_strategy,
             tile_size=self.tile_size,
@@ -673,6 +678,7 @@ class ShatterConfig(Config):
             name=uuid.UUID(x['name']),
             bounds=Bounds(*x['bounds']),
             usgs_albers=x.get('usgs_albers', False),
+            water_mask_uri=x.get('water_mask_uri'),
             tile_size=x['tile_size'],
             processing_strategy=x.get('processing_strategy', 'leaf-v1'),
             read_group_size=x.get('read_group_size'),
