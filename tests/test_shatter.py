@@ -5,6 +5,7 @@ import importlib
 import cloudpickle
 from math import ceil
 import copy
+import shutil
 import pytest
 from pathlib import Path
 
@@ -279,6 +280,142 @@ class Test_Shatter(object):
             raster_values(batch_config.tdb_dir),
             check_exact=True,
         )
+
+    def test_macro_v4_sealed_disjoint_builds_append_to_one_array(
+        self, shatter_config: ShatterConfig, storage: Storage, tmp_path,
+    ):
+        """A second sealed Batch build extends, but cannot replace, the first."""
+        if storage.config.alignment != 'AlignToCorner':
+            pytest.skip('The append regression uses pixel-is-area cells.')
+
+        canonical_uri = (tmp_path / 'append-canonical.tdb').as_posix()
+        baseline_uri = (tmp_path / 'append-baseline.tdb').as_posix()
+        for uri in (canonical_uri, baseline_uri):
+            schema = copy.deepcopy(storage.config)
+            schema.tdb_dir = uri
+            Storage.create(schema)
+
+        def build(label: str, uri: str, bounds: Bounds) -> ShatterConfig:
+            return ShatterConfig(
+                name=uuid.uuid4(), tdb_dir=uri,
+                filename=shatter_config.filename, bounds=bounds,
+                date=shatter_config.date, tile_size=1,
+                read_group_size=4,
+                processing_strategy='macro-v4-staged-publish',
+                stage_shard_side_macros=1,
+                stage_fragment_size_mb=1,
+                build_stage_uri=(tmp_path / f'{label}-stages').as_posix(),
+                build_ledger_uri=(tmp_path / f'{label}-ledger').as_posix(),
+                build_publish_concurrency=1,
+                build_publish_vfs_parallel_ops=1,
+                build_stage_vfs_parallel_ops=1,
+            )
+
+        def execute(config: ShatterConfig, *, consolidate: bool = True) -> int:
+            plan = shatter_module.plan_macro_v4_staged_build(config)
+            for block_id in plan.active_block_ids:
+                shatter_module.stage_macro_v4_batch_block(
+                    config.tdb_dir, config.build_ledger_uri,
+                    config.name, block_id,
+                )
+                shatter_module.publish_macro_v4_batch_block(
+                    config.tdb_dir, config.build_ledger_uri,
+                    config.name, block_id,
+                )
+            result = shatter_module.complete_macro_v4_batch_build(
+                config.tdb_dir, config.build_ledger_uri, config.name,
+            )
+            shatter_module.finalize_macro_v4_staged_build(
+                config.tdb_dir, config.build_ledger_uri, config.name,
+                consolidate=consolidate,
+            )
+            return result['point_count']
+
+        first = build('first', canonical_uri, Bounds(300, 300, 480, 600))
+        shatter_module.plan_macro_v4_staged_build(first)
+        shatter_module.plan_macro_v4_staged_build(first)
+        premature = build(
+            'premature', canonical_uri, Bounds(480, 300, 600, 600)
+        )
+        with pytest.raises(ValueError, match='unfinished'):
+            shatter_module.plan_macro_v4_staged_build(premature)
+        first_count = execute(first, consolidate=False)
+        first_ledger = BuildLedger(first.build_ledger_uri)
+        assert first_ledger.state('__build__').details['consolidated'] is False
+        snapshot_uri = (tmp_path / 'first-phase-snapshot.tdb').as_posix()
+        shutil.copytree(canonical_uri, snapshot_uri)
+        benchmark = shatter_module.consolidate_macro_v4_snapshot(
+            snapshot_uri, first.build_ledger_uri, first.name,
+            fragment_size_mb=1,
+        )
+        assert benchmark['point_count'] == first_count
+        assert benchmark['fragment_count_after'] <= benchmark['fragment_count_before']
+        assert first_ledger.state('__build__').details['consolidated'] is False
+        prior = Storage.from_db(canonical_uri).open('r').query(
+            attrs=['count', 'm_Z_mean'], coords=True,
+        ).df[0:9, 0:5].copy()
+
+        second = build('second', canonical_uri, Bounds(480, 300, 600, 600))
+        second_count = execute(second, consolidate=False)
+        assert first_count > 0 and second_count > 0
+
+        current = Storage.from_db(canonical_uri)
+        after = current.open('r').query(
+            attrs=['count', 'm_Z_mean'], coords=True,
+        ).df[0:9, 0:5]
+        pd.testing.assert_frame_equal(prior, after, check_exact=True)
+        assert len(current.get_history()) == 2
+
+        baseline = build('baseline', baseline_uri, Bounds(300, 300, 600, 600))
+        assert execute(baseline) == first_count + second_count
+        with current.open('r') as reader:
+            combined = reader.query(
+                attrs=['count', 'm_Z_mean'], coords=True,
+            ).df[:, :]
+        with Storage.from_db(baseline_uri).open('r') as reader:
+            expected = reader.query(
+                attrs=['count', 'm_Z_mean'], coords=True,
+            ).df[:, :]
+        columns = ['X', 'Y', 'count', 'm_Z_mean']
+        pd.testing.assert_frame_equal(
+            combined[columns].sort_values(['X', 'Y']).reset_index(drop=True),
+            expected[columns].sort_values(['X', 'Y']).reset_index(drop=True),
+            check_exact=True,
+        )
+        collection = shatter_module.consolidate_macro_v4_collection(
+            canonical_uri,
+            [
+                (first.build_ledger_uri, first.name),
+                (second.build_ledger_uri, second.name),
+            ],
+            Bounds(300, 300, 600, 600),
+            fragment_size_mb=1,
+        )
+        assert collection['phase_count'] == 2
+        assert collection['point_count'] == first_count + second_count
+        with pytest.raises(ValueError, match='exceeds target grid'):
+            shatter_module.consolidate_macro_v4_collection(
+                canonical_uri,
+                [
+                    (first.build_ledger_uri, first.name),
+                    (second.build_ledger_uri, second.name),
+                ],
+                Bounds(300, 300, 600, 570),
+                fragment_size_mb=1,
+            )
+
+        overlapping = build(
+            'overlap', canonical_uri, Bounds(450, 300, 600, 600)
+        )
+        with pytest.raises(ValueError, match='overlap pixels'):
+            shatter_module.plan_macro_v4_staged_build(overlapping)
+        different_mask = build(
+            'different-mask', canonical_uri, Bounds(450, 300, 600, 600)
+        )
+        different_mask.water_mask_uri = 's3://example/other-mask.tif'
+        with pytest.raises(ValueError, match='mix water_mask_uri'):
+            shatter_module.plan_macro_v4_staged_build(different_mask)
+
 
     def test_macro_v4_batch_operations_are_dask_independent(
         self,

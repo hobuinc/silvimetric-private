@@ -961,6 +961,57 @@ def _build_signature(
     ).hexdigest()
 
 
+def _assert_disjoint_macro_v4_append(
+    config: ShatterConfig, storage: Storage, extents: Extents
+) -> None:
+    """Keep a later build from replacing cells owned by an earlier build.
+
+    Dense stage writes fill rectangular slices, including empty cells.  A
+    second build may therefore append to the same canonical array only when
+    its *aligned pixel domain* is disjoint from every earlier shatter.  A
+    different unfinished build is also refused: its published footprint is
+    not yet a stable base for an append.  The caller must still serialize
+    independent planners at the orchestration layer; array history is not a
+    distributed lock.
+    """
+    for slot in range(1, storage.config.next_time_slot):
+        try:
+            previous = storage.get_shatter_meta(slot)
+        except KeyError:
+            # Reserving a history slot precedes publishing its metadata.
+            continue
+        if str(previous.name) == str(config.name):
+            continue
+        if not previous.finished:
+            raise ValueError(
+                'Cannot append while another build on the canonical array '
+                f'is unfinished: {previous.name}.'
+            )
+        for field in ('date', 'usgs_albers', 'water_mask_uri',
+                      'processing_halo_m', 'read_group_size'):
+            if getattr(previous, field) != getattr(config, field):
+                raise ValueError(
+                    f'Macro-v4 append would mix {field} across builds; '
+                    f'prior build is {previous.name}.'
+                )
+        if previous.bounds is None:
+            raise ValueError(
+                f'Cannot prove that prior build {previous.name} is disjoint: '
+                'its bounds are missing.'
+            )
+        prior = Extents.from_sub(
+            storage, Bounds(*previous.bounds.get())
+        )
+        if not (
+            extents.x2 <= prior.x1 or prior.x2 <= extents.x1
+            or extents.y2 <= prior.y1 or prior.y2 <= extents.y1
+        ):
+            raise ValueError(
+                'Macro-v4 append would overlap pixels owned by prior '
+                f'build {previous.name}; use disjoint grid-aligned bounds.'
+            )
+
+
 @dataclass(frozen=True)
 class MacroV4BatchPlan:
     """A durable macro-v4 plan ready for an external work dispatcher.
@@ -1073,6 +1124,7 @@ def plan_macro_v4_staged_build(config: ShatterConfig) -> MacroV4BatchPlan:
     data = Data(config.filename, storage.config, config.bounds)
     extents = Extents.from_sub(config.tdb_dir, data.bounds)
     config.bounds = data.bounds
+    _assert_disjoint_macro_v4_append(config, storage, extents)
     ledger = BuildLedger(config.build_ledger_uri, Storage.get_tdb_context(storage))
 
     if not config.time_slot:
@@ -2788,9 +2840,10 @@ def _latest_build_receipt(ledger: BuildLedger, state: str):
 
 
 def _seal_macro_v4_staged_build(
-    config: ShatterConfig, storage: Storage, ledger: BuildLedger
+    config: ShatterConfig, storage: Storage, ledger: BuildLedger,
+    *, consolidate: bool = True,
 ) -> int:
-    """Consolidate a fully published staged macro-v4 array exactly once.
+    """Seal a fully published build, optionally deferring global maintenance.
 
     This function deliberately has no ``Data`` or Dask dependency. It is safe
     to run after the point-processing workers have gone away, and an
@@ -2841,22 +2894,23 @@ def _seal_macro_v4_staged_build(
     )
     ledger.append(
         '__build__',
-        'build_consolidating',
+        'build_consolidating' if consolidate else 'build_sealing',
         build_id=str(config.name),
         fragment_count=len(fragments_before),
         published_block_count=published.details['published_block_count'],
     )
     try:
-        timed(
-            'fragment_consolidate',
-            lambda: storage.consolidate_canonical_array(
-                config.stage_fragment_size_mb
-            ),
-        )
-        timed('fragment_vacuum', storage.vacuum)
-        for mode in ['fragment_meta', 'commits', 'array_meta']:
-            timed(f'{mode}_consolidate', lambda mode=mode: storage.consolidate(mode))
-            timed(f'{mode}_vacuum', lambda mode=mode: storage.vacuum(mode))
+        if consolidate:
+            timed(
+                'fragment_consolidate',
+                lambda: storage.consolidate_canonical_array(
+                    config.stage_fragment_size_mb
+                ),
+            )
+            timed('fragment_vacuum', storage.vacuum)
+            for mode in ['fragment_meta', 'commits', 'array_meta']:
+                timed(f'{mode}_consolidate', lambda mode=mode: storage.consolidate(mode))
+                timed(f'{mode}_vacuum', lambda mode=mode: storage.vacuum(mode))
         fragments_after = timed(
             'fragment_summary_after', storage.stage_fragment_summary
         )
@@ -2870,8 +2924,11 @@ def _seal_macro_v4_staged_build(
             ),
         )
         if canonical_count != config.point_count:
+            count_label = (
+                'post-consolidation canonical' if consolidate else 'canonical'
+            )
             raise RuntimeError(
-                'Cannot seal macro-v4 build: the post-consolidation canonical '
+                f'Cannot seal macro-v4 build: the {count_label} '
                 f'count is {canonical_count}, but published receipts total '
                 f'{config.point_count}.'
             )
@@ -2902,6 +2959,7 @@ def _seal_macro_v4_staged_build(
         'published_block_count': published.details['published_block_count'],
         'point_count': config.point_count,
         'canonical_point_count': canonical_count,
+        'consolidated': consolidate,
         'fragment_count': len(fragments_after),
         'fragment_bytes': sum(fragment['bytes'] for fragment in fragments_after),
         'finalization_phases_seconds': phases,
@@ -2923,6 +2981,7 @@ def _seal_macro_v4_staged_build(
         'fragment_bytes_after': sum(
             fragment['bytes'] for fragment in fragments_after
         ),
+        'consolidation_deferred': not consolidate,
         'consolidation_seconds': round(
             perf_counter() - finalization_started, 6
         ),
@@ -2932,7 +2991,8 @@ def _seal_macro_v4_staged_build(
 
 
 def finalize_macro_v4_staged_build(
-    tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID
+    tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID,
+    *, consolidate: bool = True,
 ) -> ShatterConfig:
     """Seal a published macro-v4 build without a Dask or PDAL worker fleet.
 
@@ -2975,7 +3035,7 @@ def finalize_macro_v4_staged_build(
             'build finalization.'
         )
     config.defer_build_finalization = False
-    _seal_macro_v4_staged_build(config, storage, ledger)
+    _seal_macro_v4_staged_build(config, storage, ledger, consolidate=consolidate)
     # Preserve the publish phase's ``shatter_total_seconds``. It measures
     # source processing; including intentional worker-drain time here would
     # make benchmark comparisons misleading.
@@ -2984,6 +3044,188 @@ def finalize_macro_v4_staged_build(
     )
     final(config, storage, finished=True)
     return config
+
+
+def consolidate_macro_v4_snapshot(
+    snapshot_uri: str, build_ledger_uri: str, build_id: str | uuid.UUID,
+    *, fragment_size_mb: int = 300,
+) -> dict:
+    """Benchmark maintenance on a verified copy, never the append base.
+
+    The copied TileDB array keeps the original history metadata.  Its source
+    ledger describes exactly which first-phase macro cores to count before
+    and after consolidation.  A failure leaves the snapshot re-enterable;
+    it does not change the source ledger or canonical array.
+    """
+    if fragment_size_mb <= 0:
+        raise ValueError('fragment_size_mb must be positive')
+    storage = Storage.from_db(snapshot_uri)
+    ledger = BuildLedger(build_ledger_uri, Storage.get_tdb_context(storage))
+    manifest = ledger.build_manifest()
+    if manifest is None or manifest.details.get('build_id') != str(build_id):
+        raise ValueError('Snapshot benchmark ledger/build identity mismatch')
+    source_uri = manifest.details.get('canonical_uri', '').rstrip('/')
+    if not source_uri or source_uri == snapshot_uri.rstrip('/'):
+        raise ValueError('Snapshot benchmark requires a copy, not the source array')
+    sealed = _latest_build_receipt(ledger, 'build_sealed')
+    if sealed is None or sealed.details.get('build_id') != str(build_id):
+        raise ValueError('Source build must be sealed before a snapshot benchmark')
+    config = storage.get_shatter_meta(int(manifest.details['time_slot']))
+    if str(config.name) != str(build_id) or not config.finished:
+        raise ValueError('Snapshot history does not match the sealed source build')
+    blocks = _macro_v4_root_blocks(ledger, storage)
+    macros = [macro for group in blocks.values() for macro in group]
+    expected = int(sealed.details['point_count'])
+    before_count = _canonical_point_count(storage, macros)
+    if before_count != expected:
+        raise RuntimeError(
+            f'Snapshot contains {before_count} points; expected {expected}'
+        )
+    before = storage.stage_fragment_summary()
+    started = perf_counter()
+    storage.consolidate_canonical_array(fragment_size_mb)
+    storage.vacuum()
+    for mode in ('fragment_meta', 'commits', 'array_meta'):
+        storage.consolidate(mode)
+        storage.vacuum(mode)
+    elapsed = perf_counter() - started
+    after_count = _canonical_point_count(storage, macros)
+    if after_count != expected:
+        raise RuntimeError(
+            f'Snapshot changed point count: {before_count} -> {after_count}'
+        )
+    after = storage.stage_fragment_summary()
+    return {
+        'build_id': str(build_id),
+        'source_uri': source_uri,
+        'snapshot_uri': snapshot_uri,
+        'point_count': expected,
+        'fragment_count_before': len(before),
+        'fragment_count_after': len(after),
+        'fragment_bytes_before': sum(item['bytes'] for item in before),
+        'fragment_bytes_after': sum(item['bytes'] for item in after),
+        'consolidation_seconds': round(elapsed, 6),
+    }
+
+
+def consolidate_macro_v4_collection(
+    tdb_dir: str,
+    builds: list[tuple[str, str | uuid.UUID]],
+    expected_bounds: Bounds,
+    *, fragment_size_mb: int = 300,
+) -> dict:
+    """Verify a complete disjoint phase partition and maintain one array.
+
+    ``expected_bounds`` is the grid-aligned outer pixel rectangle declared
+    by the collection plan.  It may include empty source space, but it must
+    be covered by the union of all sealed phase rectangles without holes.
+    This operation can be retried after an interrupted TileDB consolidation.
+    """
+    if not builds or fragment_size_mb <= 0:
+        raise ValueError('Need sealed builds and a positive fragment target')
+    storage = Storage.from_db(tdb_dir)
+    target = Extents.from_sub(storage, expected_bounds)
+    listed = {str(build_id) for _, build_id in builds}
+    if len(listed) != len(builds):
+        raise ValueError('Duplicate build identity in collection plan')
+    history = []
+    for slot in range(1, storage.config.next_time_slot):
+        try:
+            history.append(storage.get_shatter_meta(slot))
+        except KeyError:
+            continue
+    if {str(item.name) for item in history} != listed:
+        raise ValueError('Canonical array history differs from collection plan')
+    extents = []
+    phases = []
+    for ledger_uri, build_id in builds:
+        build_id = str(build_id)
+        ledger = BuildLedger(ledger_uri, Storage.get_tdb_context(storage))
+        manifest = ledger.build_manifest()
+        if (
+            manifest is None
+            or manifest.details.get('build_id') != build_id
+            or manifest.details.get('canonical_uri', '').rstrip('/')
+            != tdb_dir.rstrip('/')
+        ):
+            raise ValueError(f'Collection phase {build_id} ledger mismatch')
+        receipt = ledger.state('__build__')
+        if receipt is None or receipt.state != 'build_sealed':
+            raise ValueError(f'Collection phase {build_id} is not sealed')
+        config = storage.get_shatter_meta(int(manifest.details['time_slot']))
+        if str(config.name) != build_id or not config.finished:
+            raise ValueError(f'Collection phase {build_id} history mismatch')
+        extent = Extents.from_sub(storage, config.bounds)
+        if not (
+            target.x1 <= extent.x1 < extent.x2 <= target.x2
+            and target.y1 <= extent.y1 < extent.y2 <= target.y2
+        ):
+            raise ValueError(f'Collection phase {build_id} exceeds target grid')
+        for other in extents:
+            if not (
+                extent.x2 <= other.x1 or other.x2 <= extent.x1
+                or extent.y2 <= other.y1 or other.y2 <= extent.y1
+            ):
+                raise ValueError('Collection phases overlap in pixel space')
+        extents.append(extent)
+        blocks = _macro_v4_root_blocks(ledger, storage)
+        macros = [macro for group in blocks.values() for macro in group]
+        actual = _canonical_point_count(storage, macros)
+        expected = int(receipt.details['point_count'])
+        if actual != expected:
+            raise RuntimeError(
+                f'Collection phase {build_id} has {actual} points, '
+                f'but its sealed receipt says {expected}'
+            )
+        phases.append({
+            'build_id': build_id, 'ledger_uri': ledger_uri,
+            'point_count': expected,
+            'pixel_bounds': [extent.x1, extent.y1, extent.x2, extent.y2],
+        })
+    target_area = (target.x2 - target.x1) * (target.y2 - target.y1)
+    covered_area = sum(
+        (extent.x2 - extent.x1) * (extent.y2 - extent.y1)
+        for extent in extents
+    )
+    if covered_area != target_area:
+        raise ValueError(
+            f'Collection partition covers {covered_area} of {target_area} pixels'
+        )
+    before = storage.stage_fragment_summary()
+    started = perf_counter()
+    storage.consolidate_canonical_array(fragment_size_mb)
+    storage.vacuum()
+    for mode in ('fragment_meta', 'commits', 'array_meta'):
+        storage.consolidate(mode)
+        storage.vacuum(mode)
+    elapsed = perf_counter() - started
+    after = storage.stage_fragment_summary()
+    # Recheck every durable phase footprint after maintenance, not merely a
+    # scalar total that could hide one gained and one lost cell.
+    for phase in phases:
+        ledger = BuildLedger(
+            phase['ledger_uri'], Storage.get_tdb_context(storage)
+        )
+        blocks = _macro_v4_root_blocks(ledger, storage)
+        actual = _canonical_point_count(
+            storage, [macro for group in blocks.values() for macro in group]
+        )
+        if actual != phase['point_count']:
+            raise RuntimeError(
+                f"Post-maintenance point count changed for {phase['build_id']}"
+            )
+    return {
+        'canonical_uri': tdb_dir,
+        'point_count': sum(phase['point_count'] for phase in phases),
+        'phase_count': len(phases),
+        'target_pixel_bounds': [target.x1, target.y1, target.x2, target.y2],
+        'phases': phases,
+        'fragment_count_before': len(before),
+        'fragment_count_after': len(after),
+        'fragment_bytes_before': sum(item['bytes'] for item in before),
+        'fragment_bytes_after': sum(item['bytes'] for item in after),
+        'consolidation_seconds': round(elapsed, 6),
+    }
 
 
 def group_macro_blocks(
@@ -3603,6 +3845,8 @@ def shatter(config: ShatterConfig) -> int:
     # Persist the normalized planning bounds on this run's configuration.
     # ``Data`` owns a defensive copy, so this is now stable across a resume.
     config.bounds = data.bounds
+    if config.processing_strategy == 'macro-v4-staged-publish':
+        _assert_disjoint_macro_v4_append(config, storage, extents)
 
     # Let the normal exception path record a durable partial ledger state and
     # metadata before stopping. The prior handler only saved metadata and

@@ -140,6 +140,7 @@ class BuildLedger:
             'build_stage_tasks_complete',
             'build_published',
             'build_consolidating',
+            'build_sealing',
             'build_sealed',
             'build_partial',
         }:

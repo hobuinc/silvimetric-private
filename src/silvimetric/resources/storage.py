@@ -967,6 +967,7 @@ class Storage:
             tiledb.consolidate(self.config.tdb_dir, ctx=tiledb.Ctx(c), config=c)
         except Exception as e:
             self.config.log.warning(f'{e.args}')
+            raise
 
     @staticmethod
     def create_stage(

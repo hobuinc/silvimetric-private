@@ -28,6 +28,8 @@ from .resources.config import (
 from .commands.shatter import (
     shatter,
     finalize_macro_v4_staged_build,
+    consolidate_macro_v4_snapshot,
+    consolidate_macro_v4_collection,
     plan_macro_v4_staged_build,
     stage_macro_v4_batch_block,
     publish_macro_v4_batch_block,
