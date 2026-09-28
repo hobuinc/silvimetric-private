@@ -1,6 +1,8 @@
 """A water mask must remove whole output pixels before any aggregation."""
 
 from datetime import datetime
+import importlib
+from types import SimpleNamespace
 
 import numpy as np
 from osgeo import gdal, osr
@@ -8,7 +10,9 @@ import pandas as pd
 import pytest
 
 from silvimetric.resources.config import ShatterConfig
-from silvimetric.resources.water_mask import omit_water_pixels
+from silvimetric.resources.bounds import Bounds
+from silvimetric.resources.extents import Extents
+from silvimetric.resources.water_mask import WaterMask, omit_water_pixels
 from silvimetric.resources.usgs_albers import (
     USGS_ALBERS_TOP_LEFT_X,
     USGS_ALBERS_TOP_LEFT_Y,
@@ -70,6 +74,55 @@ def test_water_mask_rejects_misaligned_missing_and_unknown_pixels(tmp_path):
 
     with pytest.raises(ValueError, match='unknown/NoData'):
         _omit(_points(), _mask(tmp_path, water_value=255))
+
+
+def test_only_complete_known_water_cores_can_skip_source_reads(tmp_path):
+    uri = _mask(tmp_path)
+    mask = WaterMask(
+        uri, root_x=USGS_ALBERS_TOP_LEFT_X,
+        root_y=USGS_ALBERS_TOP_LEFT_Y, resolution=20,
+    )
+    assert mask.core_is_fully_water(101, 200, 102, 201)
+    assert not mask.core_is_fully_water(100, 200, 102, 201)
+    assert not mask.core_is_fully_water(99, 200, 100, 201)
+    assert not mask.core_is_fully_water(101, 199, 102, 201)
+
+    unknown = WaterMask(
+        _mask(tmp_path, water_value=255),
+        root_x=USGS_ALBERS_TOP_LEFT_X,
+        root_y=USGS_ALBERS_TOP_LEFT_Y, resolution=20,
+    )
+    assert not unknown.core_is_fully_water(101, 200, 102, 201)
+
+
+def test_all_water_core_returns_before_constructing_ept_pipeline(
+    tmp_path, monkeypatch, capsys
+):
+    uri = _mask(tmp_path)
+    root = Bounds(
+        USGS_ALBERS_TOP_LEFT_X, USGS_ALBERS_TOP_LEFT_Y - 10_000,
+        USGS_ALBERS_TOP_LEFT_X + 10_000, USGS_ALBERS_TOP_LEFT_Y,
+    )
+    left = USGS_ALBERS_TOP_LEFT_X + 101 * 20
+    top = USGS_ALBERS_TOP_LEFT_Y - 200 * 20
+    core = Extents(
+        Bounds(left, top - 20, left + 20, top), 20, 'pixelisarea', root
+    )
+    storage = SimpleNamespace(config=SimpleNamespace(
+        usgs_albers=True, root=root, resolution=20,
+    ))
+    module = importlib.import_module('silvimetric.commands.shatter')
+
+    def unexpected_reader(*args, **kwargs):
+        raise AssertionError('water-only core must not construct Data/EPT')
+
+    monkeypatch.setattr(module, 'Data', unexpected_reader)
+    points = module.get_data(
+        core, 'https://example.invalid/ept.json', storage,
+        reader_collar=20, water_mask_uri=uri,
+    )
+    assert points.empty
+    assert 'SILVIMETRIC_WATER_SKIP' in capsys.readouterr().out
 
 
 def test_water_mask_requires_usgs_albers_profile():

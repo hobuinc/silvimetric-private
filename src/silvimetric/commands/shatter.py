@@ -163,6 +163,35 @@ def get_data(
     :param storage: :class:`silvimetric.resources.storage.Storage` database.
     :return: Point data array from PDAL.
     """
+    water_mask = None
+    if water_mask_uri:
+        from ..resources.water_mask import WaterMask
+
+        if not storage.config.usgs_albers:
+            raise ValueError('water mask requires USGS Albers storage')
+        water_mask = WaterMask(
+            water_mask_uri,
+            root_x=storage.config.root.minx,
+            root_y=storage.config.root.maxy,
+            resolution=storage.config.resolution,
+        )
+        if water_mask.core_is_fully_water(
+            extents.x1, extents.y1, extents.x2, extents.y2
+        ):
+            # Do not instantiate Data: even discovering the source CRS or
+            # constructing its PDAL reader can access the remote EPT. A mixed
+            # core must still read its complete collar for SMRF/HAG context.
+            print(
+                'SILVIMETRIC_WATER_SKIP '
+                + json.dumps({
+                    'bounds': extents.bounds.get(),
+                    'core_cells': (extents.x2 - extents.x1)
+                    * (extents.y2 - extents.y1),
+                }),
+                flush=True,
+            )
+            return pd.DataFrame()
+
     attrs = [*[a.name for a in storage.get_attributes()], 'xi', 'yi']
     data = Data(
         filename,
@@ -205,17 +234,8 @@ def get_data(
     )
     points.loc[:, 'yi'] = y_indices.astype(np.int32)
 
-    if water_mask_uri and not points.empty:
-        from ..resources.water_mask import omit_water_pixels
-
-        if not storage.config.usgs_albers:
-            raise ValueError('water mask requires USGS Albers storage')
-        points = omit_water_pixels(
-            points, water_mask_uri,
-            root_x=storage.config.root.minx,
-            root_y=storage.config.root.maxy,
-            resolution=storage.config.resolution,
-        )
+    if water_mask is not None and not points.empty:
+        points = water_mask.omit_pixels(points)
 
     return points
 

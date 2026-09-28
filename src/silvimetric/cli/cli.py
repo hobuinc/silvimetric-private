@@ -347,7 +347,9 @@ def initialize_cmd(
     help=(
         'Public HTTPS, S3, or local URI of a 20 m EPSG:5070 pixel-is-area '
         'water COG. Pixels marked water are omitted before all statistics and '
-        'attributes; requires a USGS Albers database.'
+        'attributes. Entirely water processing cores skip their source read; '
+        'mixed cores still read their full PDAL collar for land-pixel HAG. '
+        'Requires a USGS Albers database.'
     ),
 )
 @click.option(

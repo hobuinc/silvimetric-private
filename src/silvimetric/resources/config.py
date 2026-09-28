@@ -286,7 +286,9 @@ class ShatterConfig(Config):
     usgs_albers: bool = field(default=False)
     """Require and use the canonical USGS Albers storage-grid profile."""
     water_mask_uri: Union[str, None] = field(default=None)
-    """Aligned 20 m water-mask COG; water pixels are omitted before metrics."""
+    """Aligned 20 m water-mask COG. Water-only processing cores skip PDAL;
+    mixed cores keep their full reader neighborhood and omit water after PDAL.
+    """
     name: uuid.UUID = field(default=uuid.uuid4())
     """UUID representing this shatter process and will be generated if not
     provided., defaults to uuid.uuid()"""
