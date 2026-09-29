@@ -759,16 +759,26 @@ def _data_signature(data: pd.DataFrame) -> dict:
 
 
 def _read_populated_stage(
-    stage_uri: str, vfs_parallel_ops: int | None = None
+    stage_uri: str,
+    bounds: Bounds,
+    vfs_parallel_ops: int | None = None,
 ) -> tuple[Storage, pd.DataFrame]:
-    """Open a durable stage and return only its populated cells."""
+    """Read populated cells only inside this stage block's owned core.
+
+    Stages retain the canonical array's full domain. An unbounded dense read
+    can allocate hundreds of GiB even when an all-water stage wrote no cells.
+    """
     stage = Storage.from_db(stage_uri)
     if vfs_parallel_ops is not None:
         stage.set_context_overrides(
             **{'vfs.s3.max_parallel_ops': vfs_parallel_ops}
         )
+    core = Extents.from_sub(stage, bounds)
     with stage.open('r') as reader:
-        data = reader.df[:, :]
+        if stage.config.dimension_order == 'YX':
+            data = reader.df[core.y1:core.y2 - 1, core.x1:core.x2 - 1]
+        else:
+            data = reader.df[core.x1:core.x2 - 1, core.y1:core.y2 - 1]
     return stage, data[data['count'] > 0].copy()
 
 
@@ -1481,7 +1491,7 @@ def stage_macro_block(
     stage.set_stage_state('durably_staged', block_id=block_id)
 
     _, staged_data = _read_populated_stage(
-        stage_uri, config.build_stage_vfs_parallel_ops
+        stage_uri, _block_bounds(macros), config.build_stage_vfs_parallel_ops
     )
     signature = _data_signature(staged_data)
     if signature['point_count'] != result.point_count:
@@ -1579,7 +1589,8 @@ def publish_staged_macro_block(
     published_started = perf_counter()
     stage_read_started = perf_counter()
     _stage, staged_data = _read_populated_stage(
-        stage_uri, config.build_publish_vfs_parallel_ops
+        stage_uri, Bounds(*details['bounds']),
+        config.build_publish_vfs_parallel_ops,
     )
     result.publish_stage_read_seconds = perf_counter() - stage_read_started
     result.publish_stage_data_bytes = int(staged_data.memory_usage(deep=True).sum())

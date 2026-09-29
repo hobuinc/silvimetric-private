@@ -24,7 +24,9 @@ from silvimetric import (
     shatter,
 )
 from silvimetric.commands.extract import extract
-from silvimetric.commands.shatter import agg_list, get_data, run_graph
+from silvimetric.commands.shatter import (
+    _read_populated_stage, agg_list, get_data, run_graph,
+)
 from silvimetric.resources.config import ExtractConfig
 from silvimetric.resources.metrics.grid_metrics import get_grid_metrics
 from silvimetric.resources.usgs_albers import (
@@ -79,6 +81,18 @@ def test_profile_owns_crs_root_and_pixel_is_area_contract(tmp_path):
         '-2493045.0, 20.0, 0.0, 3310005.0, 0.0, -20.0'
     )
     assert 'NAVD88 height' in root.findtext('./SRS')
+
+
+def test_empty_stage_reads_only_owned_core_on_full_conus_domain(tmp_path):
+    """An all-water stage must not materialize its full dense CONUS domain."""
+    storage = Storage.create(_profile_config(tmp_path / 'canonical.tdb'))
+    stage_uri = str(tmp_path / 'empty-stage.tdb')
+    Storage.create_stage(storage, stage_uri)
+    bounds = Bounds(23595, 2661965, 23835, 2662205)
+
+    _stage, data = _read_populated_stage(stage_uri, bounds)
+
+    assert data.empty
 
 
 def test_profile_reprojects_source_and_keeps_origin_based_pixel_indices(

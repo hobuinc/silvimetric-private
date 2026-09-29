@@ -163,7 +163,9 @@ class Test_Shatter(object):
                 block_cells.drop(columns=['start_time', 'end_time']),
                 config.date,
             )
-            _stage, staged = shatter_module._read_populated_stage(stage_uri)
+            _stage, staged = shatter_module._read_populated_stage(
+                stage_uri, shatter_module._block_bounds(macros)
+            )
             ledger.append(
                 block_id, 'planned',
                 **shatter_module._ledger_block_details(
