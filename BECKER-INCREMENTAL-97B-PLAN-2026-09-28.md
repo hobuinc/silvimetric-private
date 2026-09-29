@@ -1,14 +1,39 @@
 # Becker 97B incremental Batch-v4 build plan (2026-09-28)
 
+## Density-calibration amendment (2026-09-29)
+
+The bounded full-resolution source sampling is complete. The authoritative
+phase manifest is now
+`/Users/hobu/dev/git/sm-distributed/config/becker-incremental-grid-plan.json`;
+the former candidate is preserved as `becker-incremental-grid-plan-provisional.json`
+alongside the query-by-query `becker-density-calibration-2026-09-29.json`.
+The new plan has **seven** complete, gapless phases rather than the five
+provisional rectangles described in the original cost sketch below. Its
+first phase is `[125639,31979,126988,33104)`, estimated at **17.987B raw
+EPT points** (nominal upper 21.743B). It includes the frozen water mask in
+the subsequent build, but these raw estimates are before masking/filtering.
+
+The 192 direct 100 m sample windows extrapolated to 99.524B points before
+normalization, 2.36% above the EPT header; the spatial model is normalized
+by 0.976909 to the advertised 97.226B. The earlier 40 m hierarchy-only
+multiplier varied too much and was rejected. The sampling evidence and
+per-phase estimates are described in
+`/Users/hobu/dev/git/sm-distributed/docs/becker-density-calibration-2026-09-29.md`.
+Run the complete-plan validator before deployment. The first-phase admission
+cap remains **$175**, but the nominal upper workload estimate is not a hard
+bound; pause and review if admission approaches that cap. The old five-phase
+and three-20B cost rows below are historical modeling assumptions, **not**
+the current dispatch schedule. Re-estimate after the first sealed phase and
+snapshot benchmark before scheduling phase 2.
+
 ## Decision and current state
 
-The first approximately 20B-point phase becomes the **base** of one private,
+The first approximately 18B-raw-point phase becomes the **base** of one private,
 permanent canonical TileDB array. After it is sealed without whole-array
 consolidation, freeze an independent private S3 copy and benchmark
 consolidation on that copy. Leave the base array untouched, then append a
-different disjoint approximately 20B-point phase. Continue with a third 20B
-phase and partition the approximately 37.2B-point remainder into smaller
-phases. Consolidate the complete canonical array once and copy that final
+different disjoint phase. Continue through the seven calibrated, disjoint
+pixel rectangles. Consolidate the complete canonical array once and copy that final
 result to one publication prefix. The snapshot copy is not the append target.
 
 No 20B job has been launched by this plan.
@@ -67,14 +92,13 @@ account spend, S3, and any untagged charges separately.
    `(-2493045, 3310005)` origin and 20 m resolution. The candidate
    `mn-beckerco-consolidation-20b.geojson` is only a point-count hint; its
    projected bounding rectangle has been converted into a provisional
-   phase-1 pixel window. The later rectangles must exactly tile the declared
-   full Becker target rectangle. Preserve the plan manifest and its SHA-256.
+   phase-1 pixel window. The seven calibrated rectangles exactly tile the
+   declared full Becker target rectangle. Preserve the plan manifest and its SHA-256.
    The request generator now accepts `--target-pixel-bounds`; that pathway
    omits the phase-wide source crop so per-macro collared reads survive at
    phase edges, then crops after reprojection in Silvimetric. The saved
-   `config/becker-incremental-grid-plan.json` identifies four as-yet
-   unallocated rectangles. Calibrate and subdivide them before phase 1 so
-   the complete partition is known up front.
+   `config/becker-incremental-grid-plan.json` now has no unallocated
+   rectangles; the original candidate remains in the `-provisional` file.
 4. Run one phase at a time. The core planner rejects overlap with any prior
    phase and refuses an append while another phase is unfinished. The Batch
    request requires explicit `--append-to-existing-canonical` and checks the
@@ -141,15 +165,12 @@ do not bound untagged S3 or long-lived storage.
 The full EPT header advertises 97,225,507,932 points. Transforming its full
 EPSG:3857 XY bounds to EPSG:5070 and rounding outward to the 20 m profile
 grid yields half-open pixel bounds **(123899, 30265, 127876, 34188)**.
-The provisional first phase is **(125639, 31979, 127281, 33104)**. It and
-the four unallocated rectangles partition all 15,601,771 target cells with
-no gap or overlap. The first rectangle expands the legacy 20B candidate to
-1,847,250 target cells, so its point count must be sampled again; 20.0B is
-not guaranteed. Actual eligible points
-may differ after missing-node handling, clipping and filtering. Three 20B
-phases cover only about 60B; they do **not** complete Becker. A single 37.2B
-remainder would need a larger admission envelope than the present $200 Batch
-template maximum, so plan two ~18.6B phases or revisit limits after phase 2.
+The calibrated first phase is **(125639, 31979, 126988, 33104)**. Seven
+rectangles partition all 15,601,771 target cells without gap or overlap;
+the first is estimated at 17.987B raw source points. Actual eligible/retained
+points may differ after missing-node handling, clipping, water masking and
+other filtering. The nominal phase upper estimates are planning diagnostics,
+not guaranteed workload limits.
 
 The 9B canonical array was 14.37 GB in 34,140 S3 objects. Linear scaling
 suggests ~33.7 GB/~80,000 objects for a 20B canonical copy, and ~164 GB for
@@ -173,11 +194,9 @@ silently raised.
 
 ## Go/no-go before phase 1
 
-- Calibrate the provisional first rectangle and subdivide the four remaining
-  pixel rectangles into phase-2 onward work with bounded source-density
-  samples. Fill in RunIds/ledger URIs as phases seal; only a plan with no
-  unallocated rectangle passes the final collection-seal tool. The legacy
-  approximate 20B polygon is not sufficient to prove gapless appends.
+- Density calibration and gapless partitioning are complete. Validate the
+  seven-phase manifest with `--require-complete` and pin its SHA-256 in the
+  phase request. Fill in RunIds/ledger URIs as phases seal.
 - Run offline Batch/template tests and one small S3 append/copy/finalize
   integration on the exact container digest. Verify `extract`, GDAL/VRT,
   counts and water-mask behavior. The completed 2.65B masked comparison
@@ -205,9 +224,14 @@ python scripts/create_batch_v4_request.py \
   --run-id "$PHASE1_RUN_ID" --batch-stack "$PHASE1_STACK" \
   --output-bucket sm-becker-056176271256-c0f24425-9fcc-4464-a7fe-820ebeb7e8be \
   --canonical-prefix builds/collection-canonical/array \
-  --target-pixel-bounds 125639,31979,127281,33104 \
+  --phase-name phase-1 \
   --defer-array-consolidation --cost-ceiling-usd 175
 ```
+
+`--phase-name` resolves the exact bounds from the complete calibrated plan
+and records its file and stable partition hashes in the immutable request;
+do not hand-copy the pixel indices. Later phases also require
+`--append-to-existing-canonical`.
 
 The request automatically uses the SHA-pinned private water mask. Run the
 zero-work Batch canary and reviewed first-stage gate before releasing all
