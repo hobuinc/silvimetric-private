@@ -217,6 +217,11 @@ The first request must be made from a deployed, committed container image
 whose digest is recorded alongside the plan. In `sm-distributed`, after its
 new per-run Batch stack is ready with matching RunId and $175 ceiling:
 
+When deploying the CloudFormation template with `--s3-bucket`, set
+`--s3-prefix infrastructure/batch-v4/$PHASE1_RUN_ID`. Do not upload the
+template under `builds/$PHASE1_RUN_ID`: request creation deliberately requires
+that run's build prefix to be empty before it writes the immutable request.
+
 ```sh
 python scripts/validate_becker_grid_plan.py \
   --plan config/becker-incremental-grid-plan.json --require-complete
