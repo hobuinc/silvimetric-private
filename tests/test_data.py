@@ -1,3 +1,7 @@
+import json
+
+import numpy as np
+import pdal
 import pytest
 
 from silvimetric import Data, Bounds
@@ -5,6 +9,48 @@ from silvimetric.resources.config import StorageConfig
 
 
 class Test_Data(object):  # noqa: D101
+    @pytest.mark.parametrize('use_pipeline', [False, True])
+    def test_noise_classes_are_removed_before_source_class_reset(
+        self, no_cell_line_path: str, storage_config: StorageConfig,
+        tmp_path, use_pipeline: bool,
+    ):
+        source = pdal.Reader(no_cell_line_path).pipeline()
+        source.execute()
+        points = source.arrays[0][:30].copy()
+        points['Classification'][:10] = 7
+        points['Classification'][10:20] = 18
+        points['Classification'][20:] = 5
+
+        copc_path = tmp_path / 'noise-classes.copc.laz'
+        writer = pdal.Pipeline(arrays=[points]) | pdal.Writer.copc(
+            filename=str(copc_path), a_srs='EPSG:5070'
+        )
+        assert writer.execute() == len(points)
+
+        filename = str(copc_path)
+        if use_pipeline:
+            pipeline_path = tmp_path / 'noise-classes.json'
+            pipeline_path.write_text(json.dumps({'pipeline': [
+                {'type': 'readers.copc', 'filename': filename},
+                {'type': 'filters.assign', 'value': 'Classification = 0'},
+            ]}))
+            filename = str(pipeline_path)
+
+        data = Data(filename, storage_config)
+        stages = json.loads(data.pipeline.pipeline)['pipeline']
+        assert stages[1]['type'] == 'filters.expression'
+        assert stages[1]['expression'] == (
+            'Classification != 7 && Classification != 18'
+        )
+        if use_pipeline:
+            assert stages[2]['type'] == 'filters.assign'
+
+        data.execute()
+        assert len(data.array) == 10
+        assert np.all(
+            data.array['Classification'] == (0 if use_pipeline else 5)
+        )
+
     def test_bounded_density_failure_reports_query_context(
         self, no_cell_line_path: str, storage_config: StorageConfig,
         monkeypatch,

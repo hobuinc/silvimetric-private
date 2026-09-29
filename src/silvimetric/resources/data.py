@@ -199,6 +199,19 @@ class Data:
             # given to us and drop them  on the floor
             if stage_type != 'writers':
                 stages.append(stage)
+                if stage_type == 'readers':
+                    # LAS classes 7 and 18 are low and high noise. Remove
+                    # them while the source Classification still exists:
+                    # caller pipelines may reset it for SMRF/HAG, which
+                    # would otherwise make these points indistinguishable
+                    # from valid returns during metric aggregation.
+                    stages.append(
+                        pdal.Filter.expression(
+                            expression=(
+                                'Classification != 7 && Classification != 18'
+                            )
+                        )
+                    )
 
         # we don't support weird pipelines of shapes
         # that aren't simply a line.
