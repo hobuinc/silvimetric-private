@@ -255,7 +255,7 @@ def test_shatter_water_mask_omits_a_populated_pixel_before_aggregation(
 
 
 def test_profile_falls_back_when_pyproj_returns_nonfinite_bounds(monkeypatch):
-    """A Dask worker must never hand PDAL ``[inf, inf, inf, inf]`` bounds.
+    """A worker must never hand PDAL ``[inf, inf, inf, inf]`` bounds.
 
     Linux/aarch64 workers have demonstrated a PROJ initialization-order issue
     where ``transform_bounds`` returns infinities instead of raising.  The
@@ -417,8 +417,6 @@ def test_cli_shatter_inherits_profile_without_flag(
         [
             '-d',
             str(database),
-            '--scheduler',
-            'single-threaded',
             'shatter',
             autzen_filepath,
             '--bounds',

@@ -11,7 +11,7 @@ def test_smrf_hag_neighbourhood_changes_when_a_work_unit_is_bisected():
     """The same points get different HAG values after a window split.
 
     The 20-unit reader collar is held fixed. Only the processing-core
-    boundary changes. This regression guards against treating a Batch/Dask
+    boundary changes. This regression guards against treating a Batch
     block-plan mismatch as a TileDB or execution-engine pixel bug.
     """
     source = Path(__file__).parent / 'data/autzen-small.copc.laz'

@@ -30,8 +30,6 @@ class TestCli(object):
                 '-d',
                 p,
                 '--debug',
-                '--scheduler',
-                'single-threaded',
                 'initialize',
                 '--resolution', '10',
                 '--crs',
@@ -59,8 +57,6 @@ class TestCli(object):
                 '-d',
                 p,
                 '--debug',
-                '--scheduler',
-                'single-threaded',
                 'initialize',
                 '--resolution',
                 '10',
@@ -97,8 +93,6 @@ class TestCli(object):
                 '-d',
                 p,
                 '--debug',
-                '--scheduler',
-                'single-threaded',
                 'initialize',
                 '--alignment',
                 alignment,
@@ -121,8 +115,6 @@ class TestCli(object):
             args=[
                 '-d',
                 p,
-                '--scheduler',
-                'single-threaded',
                 'shatter',
                 copc_filepath,
                 '--date',
@@ -162,8 +154,6 @@ class TestCli(object):
             args=[
                 '-d',
                 tdb_filepath,
-                '--scheduler',
-                'single-threaded',
                 'shatter',
                 copc_filepath,
                 '--date',
@@ -190,8 +180,6 @@ class TestCli(object):
             args=[
                 '-d',
                 tdb_dir,
-                '--scheduler',
-                'single-threaded',
                 'scan',
                 copc_filepath,
             ],
@@ -208,7 +196,7 @@ class TestCli(object):
         shatter.shatter(shatter_config)
         res = runner.invoke(
             cli.cli,
-            args=['-d', tdb_filepath, '--scheduler', 'single-threaded', 'info'],
+            args=['-d', tdb_filepath, 'info'],
         )
         assert res.exit_code == 0
 
@@ -229,8 +217,6 @@ class TestCli(object):
             args=[
                 '-d',
                 tdb_dir,
-                '--scheduler',
-                'single-threaded',
                 'extract',
                 '-a',
                 ','.join(atts),
@@ -256,8 +242,6 @@ class TestCli(object):
             [
                 '-d',
                 shatter_config.tdb_dir,
-                '--scheduler',
-                'single-threaded',
                 'delete',
                 '--id',
                 pid,
@@ -277,8 +261,6 @@ class TestCli(object):
             [
                 '-d',
                 shatter_config.tdb_dir,
-                '--scheduler',
-                'single-threaded',
                 'restart',
                 '--id',
                 i,
@@ -299,8 +281,6 @@ class TestCli(object):
             [
                 '-d',
                 shatter_config.tdb_dir,
-                '--scheduler',
-                'single-threaded',
                 'resume',
                 '--id',
                 pid,

@@ -23,7 +23,6 @@ pytest_plugins = [
     'fixtures.cli_fixtures',
     'fixtures.fusion_fixtures',
     'fixtures.metric_fixtures',
-    'fixtures.dask_fixtures',
     'fixtures.fusion_fixtures',
 ]
 

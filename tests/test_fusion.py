@@ -13,8 +13,6 @@ class TestFusion:
     """
     def test_against_fusion(
         self,
-        # configure_dask: None,
-        threaded_dask,
         plumas_shatter_config: sm.ShatterConfig,
         plumas_tif_dir: str,
         metric_map: dict,

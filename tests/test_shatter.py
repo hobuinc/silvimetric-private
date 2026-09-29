@@ -11,9 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import dask
 import tiledb
-from dask.distributed import Client, LocalCluster, SpecCluster, Worker
 from osgeo import gdal
 
 from silvimetric import (
@@ -32,23 +30,6 @@ from silvimetric.resources.build_ledger import BuildLedger
 
 
 shatter_module = importlib.import_module('silvimetric.commands.shatter')
-
-
-@dask.delayed
-def write(x, y, val, s: Storage, attrs, dims, metrics):
-    m_list = [m.entry_name(a.name) for m in metrics for a in attrs]
-    data = {
-        a.name: np.array([np.array([val], dims[a.name]), None], object)[:-1]
-        for a in attrs
-    }
-
-    for m in m_list:
-        data[m] = [val]
-
-    data['count'] = [val]
-    data['shatter_process_num'] = 1
-    with s.open('w') as w:
-        w[x, y] = data
 
 
 def confirm_one_entry(storage, maxy, base, pointcount):
@@ -199,7 +180,7 @@ class Test_Shatter(object):
             int(cells.loc[(cells.X == 1) & (cells.Y == 1), 'count'].iloc[0])
         )
 
-    def test_batch_and_dask_paths_match_with_identical_processing_cores(
+    def test_batch_and_local_paths_match_with_identical_processing_cores(
         self,
         shatter_config: ShatterConfig,
         storage: Storage,
@@ -233,9 +214,8 @@ class Test_Shatter(object):
                 build_stage_vfs_parallel_ops=1,
             )
 
-        dask_config = build_config('dask-path')
-        with Client(processes=False, n_workers=2, threads_per_worker=1):
-            assert shatter(dask_config) == test_point_count
+        local_config = build_config('local-path')
+        assert shatter(local_config) == test_point_count
 
         batch_config = build_config('batch-path')
         plan = shatter_module.plan_macro_v4_staged_build(batch_config)
@@ -264,11 +244,11 @@ class Test_Shatter(object):
             batch_config.name,
         )
 
-        dask_plan = dask_config.execution_timing['planner']
-        assert dask_plan['processing_grid_sha256'] == (
+        local_plan = local_config.execution_timing['planner']
+        assert local_plan['processing_grid_sha256'] == (
             plan.planner['processing_grid_sha256']
         )
-        assert dask_plan['processing_macro_split_count'] == 0
+        assert local_plan['processing_macro_split_count'] == 0
         assert plan.planner['processing_macro_split_count'] == 0
 
         def raster_values(uri: str) -> pd.DataFrame:
@@ -278,7 +258,7 @@ class Test_Shatter(object):
             ).reset_index(drop=True)
 
         pd.testing.assert_frame_equal(
-            raster_values(dask_config.tdb_dir),
+            raster_values(local_config.tdb_dir),
             raster_values(batch_config.tdb_dir),
             check_exact=True,
         )
@@ -419,7 +399,7 @@ class Test_Shatter(object):
             shatter_module.plan_macro_v4_staged_build(different_mask)
 
 
-    def test_macro_v4_batch_operations_are_dask_independent(
+    def test_macro_v4_batch_operations_are_process_independent(
         self,
         shatter_config: ShatterConfig,
         storage: Storage,
@@ -430,7 +410,7 @@ class Test_Shatter(object):
         """A durable plan can be staged and published one block at a time.
 
         This is the execution contract used by the Batch worker image.  The
-        test intentionally creates no Dask client: every worker reconstructs
+        test creates no local worker pool: every worker reconstructs
         its block and configuration solely from the canonical array and the
         append-only ledger.
         """
@@ -665,12 +645,12 @@ class Test_Shatter(object):
             shatter_module._block_schema_hash(stage)
         )
 
-    def test_macro_v4_schema_identity_survives_dask_serialization(
+    def test_macro_v4_schema_identity_survives_serialization(
         self, storage: Storage
     ):
         """A worker must retain the canonical persisted contract verbatim.
 
-        Metric/filter callables are dill-encoded in StorageConfig.  Dask's
+        Metric/filter callables are dill-encoded in StorageConfig. A
         cloudpickle round trip may legitimately regenerate those encodings;
         the separate ``_serialized_config`` contract must therefore survive
         and keep the stage receipt compatible with the canonical publisher.
@@ -845,11 +825,10 @@ class Test_Shatter(object):
             for window in planner['windows']
         )
 
-    def test_stage_failure_classifier_recognizes_dask_killed_worker(self):
-        class KilledWorker(Exception):
-            pass
-
-        assert shatter_module._stage_failure_kind(KilledWorker()) == (
+    def test_stage_failure_classifier_recognizes_batch_worker_loss(self):
+        assert shatter_module._stage_failure_kind(
+            RuntimeError('Batch container exited before receipt')
+        ) == (
             'worker_lost_after_retries'
         )
         assert shatter_module._stage_failure_kind(
@@ -922,7 +901,7 @@ class Test_Shatter(object):
         The whole-AOI calibration samples a 2-by-2 grid.  This fixture puts a
         dense area between those four locations, where the old planner would
         submit one oversized task and learn only after a killed worker.  The
-        per-block sample sees that density before Dask work is created.
+        per-block sample sees that density before Batch work is released.
         """
 
         class LocalizedDensityData:
@@ -1048,7 +1027,6 @@ class Test_Shatter(object):
         shatter_config: ShatterConfig,
         storage: Storage,
         test_point_count: int,
-        # threaded_dask,
     ):
         shatter(shatter_config)
         base = 11 if storage.config.alignment == 'AlignToCenter' else 10
@@ -1061,7 +1039,6 @@ class Test_Shatter(object):
         storage: Storage,
         test_point_count: int,
         monkeypatch: pytest.MonkeyPatch,
-        threaded_dask,
     ):
         """macro-v2 must dispatch to worker-side writes, not leaf-v1."""
         shatter_config.tile_size = 1
@@ -1098,7 +1075,6 @@ class Test_Shatter(object):
         storage: Storage,
         test_point_count: int,
         tmp_path,
-        threaded_dask,
         monkeypatch: pytest.MonkeyPatch,
     ):
         """Stage-and-push uses independent, restart-safe local-stage tasks."""
@@ -1121,7 +1097,7 @@ class Test_Shatter(object):
         def no_address_pinned_partial_tasks(*args, **kwargs):
             pytest.fail(
                 'macro-v3 must not depend on address-pinned partial/final '
-                'tasks: a Dask worker restart makes them unrunnable'
+                'tasks: a worker restart makes them unrunnable'
             )
 
         monkeypatch.setattr(
@@ -1180,10 +1156,8 @@ class Test_Shatter(object):
         shatter_config: ShatterConfig,
         storage: Storage,
         tmp_path,
-        threaded_dask,
-        monkeypatch: pytest.MonkeyPatch,
     ):
-        """Distributed shard reads must preserve the macro-v2 extract result."""
+        """Shard reads must preserve the macro-v2 extract result."""
         v2_dir = (tmp_path / 'macro-v2.tdb').as_posix()
         seed_dir = (tmp_path / 'macro-v3-seed.tdb').as_posix()
         stage_dir = (tmp_path / 'macro-v3-stage.tdb').as_posix()
@@ -1218,21 +1192,6 @@ class Test_Shatter(object):
         )
         assert shatter(v2) == shatter(v3)
 
-        class InlineClient:
-            def __init__(self):
-                self.submissions = []
-
-            def submit(self, func, *args):
-                self.submissions.append((func, args))
-                return func(*args)
-
-            def gather(self, futures):
-                return futures
-
-        inline_client = InlineClient()
-        monkeypatch.setattr(
-            'silvimetric.commands.extract.get_client', lambda: inline_client
-        )
         v2_output = tmp_path / 'macro-v2-extract'
         v3_output = tmp_path / 'macro-v3-extract'
         for database, output in ((v2_dir, v2_output), (v3_dir, v3_output)):
@@ -1257,7 +1216,6 @@ class Test_Shatter(object):
                 left.GetRasterBand(1).ReadAsArray(),
                 right.GetRasterBand(1).ReadAsArray(),
             )
-        assert len(inline_client.submissions) == len(Storage.shard_members(v3_dir))
 
     def test_macro_v4_writes_one_array_and_matches_macro_v2(
         self,
@@ -1265,7 +1223,6 @@ class Test_Shatter(object):
         storage: Storage,
         test_point_count: int,
         tmp_path,
-        threaded_dask,
     ):
         """Macro-v4 stores every disjoint macro as one array's fragments."""
         v2_dir = (tmp_path / 'macro-v2.tdb').as_posix()
@@ -1338,51 +1295,12 @@ class Test_Shatter(object):
                 right.GetRasterBand(1).ReadAsArray(),
             )
 
-    def test_macro_v4_accepts_parallel_disjoint_writers(
-        self,
-        shatter_config: ShatterConfig,
-        storage: Storage,
-        test_point_count: int,
-        tmp_path,
-    ):
-        """Two Dask workers may commit disjoint macro ranges to one array."""
-        v4_dir = (tmp_path / 'macro-v4-parallel.tdb').as_posix()
-        v4_storage_config = copy.deepcopy(storage.config)
-        v4_storage_config.tdb_dir = v4_dir
-        Storage.create(v4_storage_config)
-        v4 = ShatterConfig(
-            tdb_dir=v4_dir,
-            filename=shatter_config.filename,
-            bounds=shatter_config.bounds,
-            date=shatter_config.date,
-            tile_size=1,
-            read_group_size=4,
-            processing_strategy='macro-v4-single-array',
-            stage_fragment_size_mb=1,
-        )
-        with LocalCluster(
-            n_workers=2,
-            threads_per_worker=1,
-            processes=False,
-            dashboard_address=None,
-        ) as cluster:
-            with Client(cluster):
-                assert shatter(v4) == test_point_count
-
-        v4_storage = Storage.from_db(v4_dir)
-        assert int(v4_storage.open('r').df[:, :]['count'].sum()) == test_point_count
-        executor = v4.execution_timing['planner']['distributed_executor']
-        assert executor['mode'] == 'disjoint-blocks-write-one-array'
-        assert executor['block_task_count'] >= 2
-        assert executor['retries'] == 0
-
     def test_macro_v4_staged_publish_resumes_from_immutable_ledger(
         self,
         shatter_config: ShatterConfig,
         storage: Storage,
         test_point_count: int,
         tmp_path,
-        threaded_dask,
     ):
         """A sealed build can be restarted without recomputing its macros."""
         staged_dir = (tmp_path / 'macro-v4-staged.tdb').as_posix()
@@ -1446,7 +1364,7 @@ class Test_Shatter(object):
         assert resume_status['published_block_count'] == (
             resume_status['planned_block_count']
         )
-        assert resumed.execution_timing['planner']['distributed_executor'][
+        assert resumed.execution_timing['planner']['local_batch_driver'][
             'stage_task_count'
         ] == 0
         assert resumed.time_slot == first.time_slot
@@ -1496,15 +1414,7 @@ class Test_Shatter(object):
             build_stage_vfs_parallel_ops=1,
             defer_build_finalization=True,
         )
-        with LocalCluster(
-            n_workers=2,
-            threads_per_worker=1,
-            processes=False,
-            dashboard_address=None,
-            resources={'silvimetric_stage': 1},
-        ) as cluster:
-            with Client(cluster):
-                assert shatter(config) == test_point_count
+        assert shatter(config) == test_point_count
 
         ledger = BuildLedger(ledger_uri)
         assert ledger.state('__build__').state == 'build_published'
@@ -1512,8 +1422,7 @@ class Test_Shatter(object):
         stored = Storage.from_db(staged_dir).get_shatter_meta(config.time_slot)
         assert not stored.finished
 
-        # No LocalCluster or Dask client exists here. This proves that the
-        # expensive canonical maintenance phase depends only on the ledger and
+        # The expensive canonical maintenance phase depends only on the ledger and
         # canonical array, not on workers, source EPT access, or PDAL.
         real_canonical_count = shatter_module._canonical_point_count
         monkeypatch.setattr(
@@ -1689,96 +1598,10 @@ class Test_Shatter(object):
 
         resumed = ShatterConfig(name=build_id, **common)
         assert shatter(resumed) == test_point_count
-        assert resumed.execution_timing['planner']['distributed_executor'][
+        assert resumed.execution_timing['planner']['local_batch_driver'][
             'stage_task_count'
         ] == 0
         assert ledger.state('__build__').state == 'build_sealed'
-
-    def test_macro_v4_staged_publish_uses_dask_stages_and_bounded_publishers(
-        self,
-        shatter_config: ShatterConfig,
-        storage: Storage,
-        test_point_count: int,
-        tmp_path,
-    ):
-        """Stages execute in parallel while canonical writers stay bounded."""
-        staged_dir = (tmp_path / 'macro-v4-distributed.tdb').as_posix()
-        staged_storage_config = copy.deepcopy(storage.config)
-        staged_storage_config.tdb_dir = staged_dir
-        Storage.create(staged_storage_config)
-        config = ShatterConfig(
-            name=uuid.uuid4(),
-            tdb_dir=staged_dir,
-            filename=shatter_config.filename,
-            bounds=shatter_config.bounds,
-            date=shatter_config.date,
-            tile_size=1,
-            read_group_size=4,
-            processing_halo_m=shatter_config.processing_halo_m,
-            processing_strategy='macro-v4-staged-publish',
-            stage_shard_side_macros=1,
-            stage_fragment_size_mb=1,
-            build_stage_uri=(tmp_path / 'distributed-stage').as_posix(),
-            build_ledger_uri=(tmp_path / 'distributed-ledger').as_posix(),
-            build_publish_concurrency=2,
-            build_publish_vfs_parallel_ops=1,
-            build_stage_vfs_parallel_ops=1,
-        )
-        # Model the production split fleet: stage processes are allowed to
-        # retain large PDAL point views, while canonical publishers have no
-        # stage token at all.  This prevents a future capacity check against
-        # the total number of workers from silently falling back to
-        # unrestricted stage scheduling.
-        worker_specs = {
-            **{
-                f'stage-{index}': {
-                    'cls': Worker,
-                    'options': {
-                        'nthreads': 1,
-                        'resources': {'silvimetric_stage': 1},
-                    },
-                }
-                for index in range(2)
-            },
-            **{
-                f'publisher-{index}': {
-                    'cls': Worker,
-                    'options': {
-                        'nthreads': 1,
-                        'resources': {'silvimetric_publisher': 1},
-                    },
-                }
-                for index in range(2)
-            },
-        }
-        with SpecCluster(
-            workers=worker_specs,
-            asynchronous=False,
-            silence_logs=False,
-        ) as cluster:
-            with Client(cluster):
-                assert shatter(config) == test_point_count
-
-        executor = config.execution_timing['planner']['distributed_executor']
-        assert executor['mode'] == 'durable-stages-bounded-canonical-publishers'
-        assert executor['stage_task_count'] >= 2
-        assert executor['publisher_concurrency'] == 2
-        assert executor['stage_inflight_limit'] == 2
-        assert executor['stage_resource'] == 'silvimetric_stage'
-        assert executor['stage_resource_capacity'] == 2
-        assert executor['publisher_resource'] == 'silvimetric_publisher'
-        assert executor['publisher_resource_capacity'] == 2
-        assert executor['max_pending_publish_blocks'] >= 0
-        assert executor['publish_retries'] == 0
-        ledger = BuildLedger(config.build_ledger_uri)
-        assert any(
-            record.state == 'build_stage_tasks_complete'
-            for record in ledger.records('__build__')
-        )
-        point_count = Storage.from_db(staged_dir).open('r').df[:, :][
-            'count'
-        ].sum()
-        assert int(point_count) == test_point_count
 
     def test_macro_v4_adaptively_splits_a_memory_limited_stage(
         self,
@@ -1831,14 +1654,7 @@ class Test_Shatter(object):
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(shatter_module, 'stage_macro_block', fail_one_parent)
         try:
-            with LocalCluster(
-                n_workers=2,
-                threads_per_worker=1,
-                processes=False,
-                dashboard_address=None,
-            ) as cluster:
-                with Client(cluster):
-                    assert shatter(config) == test_point_count
+            assert shatter(config) == test_point_count
         finally:
             monkeypatch.undo()
 
@@ -1864,7 +1680,7 @@ class Test_Shatter(object):
             ledger.state(child['block_id']).state == 'published'
             for child in children
         )
-        executor = config.execution_timing['planner']['distributed_executor']
+        executor = config.execution_timing['build_ledger']
         assert executor['adaptive_split_count'] == 1
         assert executor['adaptive_splits'] == [
             {
@@ -1977,15 +1793,8 @@ class Test_Shatter(object):
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(shatter_module, 'stage_macro_block', fail_one_stage)
         try:
-            with LocalCluster(
-                n_workers=2,
-                threads_per_worker=1,
-                processes=False,
-                dashboard_address=None,
-            ) as cluster:
-                with Client(cluster):
-                    with pytest.raises(RuntimeError, match='simulated worker loss'):
-                        shatter(ShatterConfig(name=build_id, **common))
+            with pytest.raises(RuntimeError, match='simulated worker loss'):
+                shatter(ShatterConfig(name=build_id, **common))
         finally:
             monkeypatch.undo()
 
@@ -1994,17 +1803,10 @@ class Test_Shatter(object):
         failed_id = failure_marker.read_text(encoding='utf8')
         assert ledger.state(failed_id).state == 'failed'
 
-        with LocalCluster(
-            n_workers=2,
-            threads_per_worker=1,
-            processes=False,
-            dashboard_address=None,
-        ) as cluster:
-            with Client(cluster):
-                resumed = ShatterConfig(name=build_id, **common)
-                assert shatter(resumed) == test_point_count
+        resumed = ShatterConfig(name=build_id, **common)
+        assert shatter(resumed) == test_point_count
 
-        assert resumed.execution_timing['planner']['distributed_executor'][
+        assert resumed.execution_timing['planner']['local_batch_driver'][
             'stage_task_count'
         ] == 1
 
@@ -2093,7 +1895,6 @@ class Test_Shatter(object):
         test_point_count: int,
         request: pytest.FixtureRequest,
         alignment: str,
-        threaded_dask,
     ):
         s = request.getfixturevalue(sh_cfg)
         storage = Storage.from_db(s.tdb_dir)
@@ -2159,8 +1960,6 @@ class Test_Shatter(object):
         s3_shatter_config: ShatterConfig,
         s3_storage: Storage,
     ):
-        # need processes scheduler to accurately test bug fix
-        dask.config.set(scheduler='processes')
         maxy = s3_storage.config.root.maxy
         base = 11
         point_count = 108900

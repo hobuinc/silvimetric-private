@@ -140,7 +140,7 @@ class TestExtents(object):
                 Expected {test_point_count}, got {ufc}"""
 
     def test_chunking(
-        self, autzen_storage: StorageConfig, autzen_data, threaded_dask
+        self, autzen_storage: StorageConfig, autzen_data
     ):
         ex = Extents(
             autzen_data.bounds,
