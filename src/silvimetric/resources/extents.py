@@ -3,8 +3,6 @@ import numpy as np
 import itertools
 from typing_extensions import Self
 
-from dask.delayed import delayed
-from dask import compute
 
 from .bounds import Bounds
 from .storage import Storage
@@ -113,12 +111,10 @@ class Extents(object):
         :param pc_threshold: Point count threshold., defaults to 600000
         :return: Return list of Extents that fit the criteria
         """
-        data = delayed(data)
-        pc_threshold = delayed(pc_threshold)
         tasks = [self.filter(data, pc_threshold)]
         chunks = []
         while tasks:
-            results = compute(*tasks)
+            results = tasks
             tasks = []
             for r in results:
                 if r is None:
@@ -129,7 +125,6 @@ class Extents(object):
                     tasks = tasks + r
         return chunks
 
-    @delayed
     def filter(
         self,
         data: Data,

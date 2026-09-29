@@ -1,7 +1,5 @@
 import numpy as np
 import logging
-import dask.bag as db
-import dask
 import math
 import json
 
@@ -141,27 +139,24 @@ def extent_handle(
         extent.root = chunk.bounds
     data = data
     chunk = chunk
-    curr = db.from_delayed(
-        tile_info(chunk, data, res_threshold, pc_threshold, depth_threshold)
-    )
+    curr = [tile_info(chunk, data, res_threshold, pc_threshold, depth_threshold)]
     a = []
 
     curr_depth = 0
-    while curr.npartitions > 0:
-        logger.info(f'Chunking {curr.npartitions} tiles at depth {curr_depth}')
-        n = curr.compute()
+    while curr:
+        logger.info(f'Chunking {len(curr)} tiles at depth {curr_depth}')
+        n = curr
         to_add = [x for x in n if isinstance(x, int)]
         a = a + to_add
 
         to_next = [x for x in n if not isinstance(x, int)]
 
-        curr = db.from_delayed(to_next)
+        curr = [item for children in to_next for item in children]
         curr_depth += 1
 
     return list(a)
 
 
-@dask.delayed
 def tile_info(
     extent: Extents,
     data: Data,

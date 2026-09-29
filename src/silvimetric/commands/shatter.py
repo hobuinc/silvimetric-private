@@ -18,12 +18,6 @@ from typing_extensions import Generator
 import pandas as pd
 import tiledb
 
-from distributed.client import _get_global_client as get_client
-
-from dask.delayed import delayed
-from dask import compute
-from dask.distributed import as_completed
-
 from .. import Bounds, Extents, Storage, Data, ShatterConfig, Metric
 from ..resources.build_ledger import BuildLedger
 from ..resources.taskgraph import Graph
@@ -54,7 +48,7 @@ def _rss_bytes() -> int | None:
 class MacroMemoryMonitor:
     """Sample worker RSS while a macro task executes.
 
-    RSS belongs to the Dask worker process rather than a Python task.  The
+    RSS belongs to the worker process rather than a Python task.  The
     resulting record is therefore labelled as a *worker-process* peak.  The
     bounded profiling run intentionally schedules one macro at a time per
     worker, which makes this value a safe per-macro concurrency input.
@@ -322,7 +316,7 @@ def do_one(
     leaf: Extents, config: ShatterConfig, storage: Storage
 ) -> pd.DataFrame:
     """
-    Create dask bags and the order of operations.
+    Read and aggregate one processing leaf.
 
     :param leaf: Extents to operate on.
     :param config: :class:`silvimetric.resources.config.ShatterConfig`.
@@ -439,19 +433,11 @@ def _attach_macro_diagnostic(
     return result
 
 
-def _resolve_actor_result(result):
-    """Return a local value or synchronously resolve a Dask ActorFuture."""
-    resolver = getattr(result, 'result', None)
-    return resolver() if callable(resolver) else result
-
-
 class MacroStageWriter:
     """Single-owner local TileDB writer used by ``macro-v3-stage-push``.
 
-    When constructed as a Dask actor, macro workers transfer their final
-    aggregates directly to this actor.  The actor buffers spatially adjacent
-    macros and writes each compact batch once; workers therefore do not queue
-    behind a TileDB write per macro.
+    The writer buffers spatially adjacent macros and writes each compact
+    batch once.
     """
 
     def __init__(self, stage_config, shatter_config: ShatterConfig):
@@ -579,7 +565,7 @@ def _shard_name(macros: list[Extents]) -> str:
 def _stage_attempt_uri(config: ShatterConfig, shard_name: str) -> str:
     """Return an attempt-local stage path for a macro-v3 shard task.
 
-    A Dask task may be rerun after its worker is killed.  The killed process
+    A stage task may be rerun after its worker is killed. The killed process
     can leave a partially-created TileDB stage on its host-local disk, so a
     stable ``shards/<name>.tdb`` path makes a legitimate retry fail before it
     can do any work.  The published S3 shard name remains stable; only the
@@ -927,7 +913,7 @@ def _block_schema_hash(storage: Storage) -> str:
     """
     # The exact document persisted by the canonical array is its storage
     # contract. Re-serializing callable metric/filter definitions after a
-    # Dask process boundary can change their dill bytes even though the
+    # worker process boundary can change their dill bytes even though the
     # effective TileDB schema is unchanged.
     serialized = getattr(storage, '_serialized_config', None)
     schema = (
@@ -1026,7 +1012,7 @@ def _assert_disjoint_macro_v4_append(
 class MacroV4BatchPlan:
     """A durable macro-v4 plan ready for an external work dispatcher.
 
-    The plan deliberately contains identifiers rather than Dask futures or
+    The plan deliberately contains identifiers rather than task objects or
     point data.  Batch, SQS, and a later recovery driver can all reconstruct
     a block from its immutable ledger receipt and the canonical array's
     persisted shatter configuration.
@@ -1110,7 +1096,7 @@ def _macro_v4_batch_block(
 
 
 def plan_macro_v4_staged_build(config: ShatterConfig) -> MacroV4BatchPlan:
-    """Persist a macro-v4 plan without starting a Dask or PDAL worker fleet.
+    """Persist a macro-v4 plan without starting a PDAL worker fleet.
 
     ``macro-v4-staged-publish`` already uses immutable stages and receipts;
     this function separates its planning phase so an external dispatcher can
@@ -1220,7 +1206,7 @@ def plan_macro_v4_staged_build(config: ShatterConfig) -> MacroV4BatchPlan:
 def stage_macro_v4_batch_block(
     tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID, block_id: str
 ) -> 'MacroTaskResult':
-    """Run one reconstructed macro-v4 stage outside Dask.
+    """Run one reconstructed macro-v4 stage in an isolated process.
 
     Batch workers call this after acquiring an external lease.  The function
     deliberately does not claim or lock work: object-store receipts remain
@@ -1236,7 +1222,7 @@ def stage_macro_v4_batch_block(
 def publish_macro_v4_batch_block(
     tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID, block_id: str
 ) -> 'MacroTaskResult':
-    """Publish one durable macro-v4 stage outside Dask."""
+    """Publish one durable macro-v4 stage in an isolated process."""
     config, _storage, _ledger = _macro_v4_batch_config(
         tdb_dir, build_ledger_uri, build_id
     )
@@ -1688,9 +1674,8 @@ def finalize_macro_block(
 ) -> 'MacroTaskResult':
     """Merge local partial stages, consolidate once, and commit one S3 shard.
 
-    The caller pins this task to the same worker as the partial tasks, so only
-    lightweight result records cross Dask.  Point/metric DataFrames never
-    leave that worker's local disk and memory.
+    The local stage writer keeps point/metric DataFrames on local disk and
+    in memory until its shard is published.
     """
     result = combine_macro_results(macro_results)
     if not result.point_count:
@@ -1783,9 +1768,7 @@ def do_macro_to_stage(
     del points, listed_data, metric_data
 
     phase_started = perf_counter()
-    point_count = _resolve_actor_result(
-        stage_writer.write(joined_data, config.date)
-    )
+    point_count = stage_writer.write(joined_data, config.date)
     write_seconds = perf_counter() - phase_started
     del joined_data
     return MacroTaskResult(
@@ -1880,44 +1863,9 @@ def run(leaves: Leaves, config: ShatterConfig, storage: Storage) -> int:
     """
 
     start_time = int(datetime.now().timestamp()*1000)
-    dc = get_client()
-
-    joined_dfs = []
-    failures = []
-
-    if dc is not None:
-        futures = [
-            dc.submit(do_one, leaf=leaf, config=config, storage=storage)
-            for leaf in leaves
-        ]
-        res = as_completed(futures, with_results=True, raise_errors=False)
-        for future, df in res:
-            if future.status == 'error':
-                failures.append((future, df))
-                continue
-
-            if df is not None:
-                joined_dfs.append(df)
-            del df
-
-        if failures:
-            messages = []
-            for future, error in failures:
-                key = getattr(future, 'key', '<unknown task>')
-                messages.append(f'{key}: {type(error).__name__}: {error}')
-            failure = RuntimeError(
-                f'{len(failures)} Dask shatter task(s) failed:\n'
-                + '\n'.join(messages)
-            )
-            cause = failures[0][1]
-            if isinstance(cause, BaseException):
-                raise failure from cause
-            raise failure
-    else:
-        processes = [delayed(do_one)(leaf, config, storage) for leaf in leaves]
-        results = compute(*processes)
-
-        joined_dfs = [df for df in results if df is not None]
+    joined_dfs = [df for leaf in leaves if (df := do_one(
+        leaf, config, storage
+    )) is not None]
 
     if joined_dfs:
         final_df = pd.concat(joined_dfs).sort_values(by=['xi', 'yi'])
@@ -1934,21 +1882,6 @@ def run(leaves: Leaves, config: ShatterConfig, storage: Storage) -> int:
     return config.point_count
 
 
-def _raise_task_failures(failures: list[tuple[object, object]]) -> None:
-    """Raise one useful error after all distributed task results are known."""
-    messages = []
-    for future, error in failures:
-        key = getattr(future, 'key', '<unknown task>')
-        messages.append(f'{key}: {type(error).__name__}: {error}')
-    failure = RuntimeError(
-        f'{len(failures)} Dask shatter task(s) failed:\n' + '\n'.join(messages)
-    )
-    cause = failures[0][1]
-    if isinstance(cause, BaseException):
-        raise failure from cause
-    raise failure
-
-
 def run_macro(
     macros: Leaves, config: ShatterConfig, storage: Storage
 ) -> int:
@@ -1961,32 +1894,7 @@ def run_macro(
     """
     start_time = int(datetime.now().timestamp() * 1000)
     driver_started = perf_counter()
-    dc = get_client()
-    failures = []
-    task_results: list[MacroTaskResult] = []
-
-    if dc is not None:
-        futures = [
-            dc.submit(
-                do_macro,
-                macro=macro,
-                config=config,
-                storage=storage,
-                retries=0,
-            )
-            for macro in macros
-        ]
-        completed = as_completed(futures, with_results=True, raise_errors=False)
-        for future, result in completed:
-            if future.status == 'error':
-                failures.append((future, result))
-            else:
-                task_results.append(result)
-        if failures:
-            _raise_task_failures(failures)
-    else:
-        for macro in macros:
-            task_results.append(do_macro(macro, config, storage))
+    task_results = [do_macro(macro, config, storage) for macro in macros]
 
     point_count = sum(result.point_count for result in task_results)
     batch_timing = summarize_macro_timing(
@@ -2008,24 +1916,10 @@ def run_macro(
 def make_stage_writer(
     source_storage: Storage, config: ShatterConfig
 ) -> MacroStageWriter:
-    """Create the single local stage owner, optionally pinned to one worker."""
+    """Create the single local stage owner."""
     stage_config = copy.deepcopy(source_storage.config)
     stage_config.tdb_dir = config.stage_tdb_dir
-    dc = get_client()
-    if dc is None:
-        return MacroStageWriter(stage_config, config)
-
-    submit_options = {'actor': True}
-    if config.stage_worker_address:
-        submit_options['workers'] = [config.stage_worker_address]
-        submit_options['allow_other_workers'] = False
-    future = dc.submit(
-        MacroStageWriter,
-        stage_config,
-        config,
-        **submit_options,
-    )
-    return future.result()
+    return MacroStageWriter(stage_config, config)
 
 
 def run_macro_to_stage(
@@ -2036,57 +1930,12 @@ def run_macro_to_stage(
 ) -> int:
     """Run macro-v3 compact spatial blocks and publish committed shards."""
     driver_started = perf_counter()
-    dc = get_client()
-    failures = []
     task_results: list[MacroTaskResult] = []
     macro_blocks, planner = plan_macro_blocks(
         list(macros), config, storage, data
     )
-    if dc is not None:
-        if not dc.scheduler_info()['workers']:
-            raise RuntimeError('macro-v3 requires at least one Dask worker')
-        estimated_points = {
-            window['name']: window['estimated_max_points']
-            for window in planner.get('windows', [])
-        }
-        planned_blocks = sorted(
-            macro_blocks,
-            key=lambda block: estimated_points.get(_shard_name(block), 0),
-            reverse=True,
-        )
-        # A block owns a local TileDB stage, so it must perform its complete
-        # process -> consolidate -> publish lifecycle on one worker.  Do not
-        # split it into partial tasks then pin a finalizer to a concrete Dask
-        # worker address: a nanny restart changes that address and leaves the
-        # finalizer permanently unrunnable.  One independent block per task
-        # retains Dask work stealing and permits safe recovery on another
-        # worker, while stage paths remain local to the executing task.
-        futures = [
-            dc.submit(
-                do_macro_to_shard,
-                macros=block,
-                config=config,
-                storage=storage,
-                retries=0,
-            )
-            for block in planned_blocks
-        ]
-        planner['distributed_executor'] = {
-            'mode': 'one-local-stage-per-spatial-block',
-            'worker_address_restrictions': False,
-            'block_task_count': len(futures),
-        }
-        completed = as_completed(futures, with_results=True, raise_errors=False)
-        for future, result in completed:
-            if future.status == 'error':
-                failures.append((future, result))
-            else:
-                task_results.append(result)
-        if failures:
-            _raise_task_failures(failures)
-    else:
-        for block in macro_blocks:
-            task_results.append(do_macro_to_shard(block, config, storage))
+    for block in macro_blocks:
+        task_results.append(do_macro_to_shard(block, config, storage))
 
     config.point_count += sum(result.point_count for result in task_results)
     published = [result for result in task_results if result.shard_uri]
@@ -2141,51 +1990,12 @@ def run_macro_to_single_array(
             'create a new immutable release URI for each run.'
         )
 
-    dc = get_client()
-    failures = []
     task_results: list[MacroTaskResult] = []
     macro_blocks, planner = plan_macro_blocks(
         list(macros), config, storage, data
     )
-    if dc is not None:
-        if not dc.scheduler_info()['workers']:
-            raise RuntimeError('macro-v4 requires at least one Dask worker')
-        estimated_points = {
-            window['name']: window['estimated_max_points']
-            for window in planner.get('windows', [])
-        }
-        planned_blocks = sorted(
-            macro_blocks,
-            key=lambda block: estimated_points.get(_shard_name(block), 0),
-            reverse=True,
-        )
-        futures = [
-            dc.submit(
-                do_macro_to_single_array,
-                macros=block,
-                config=config,
-                storage=storage,
-                retries=0,
-            )
-            for block in planned_blocks
-        ]
-        planner['distributed_executor'] = {
-            'mode': 'disjoint-blocks-write-one-array',
-            'worker_address_restrictions': False,
-            'block_task_count': len(futures),
-            'retries': 0,
-        }
-        completed = as_completed(futures, with_results=True, raise_errors=False)
-        for future, result in completed:
-            if future.status == 'error':
-                failures.append((future, result))
-            else:
-                task_results.append(result)
-        if failures:
-            _raise_task_failures(failures)
-    else:
-        for block in macro_blocks:
-            task_results.append(do_macro_to_single_array(block, config, storage))
+    for block in macro_blocks:
+        task_results.append(do_macro_to_single_array(block, config, storage))
 
     config.point_count += sum(result.point_count for result in task_results)
     fragments_before = storage.stage_fragment_summary()
@@ -2230,10 +2040,9 @@ def run_macro_to_single_array(
 def _stage_failure_kind(error: object) -> str:
     """Classify a final stage-task failure without trusting worker-local state.
 
-    A Dask nanny can kill the entire worker process, so the Python task often
-    cannot raise ``MemoryError`` itself.  Dask reports that condition as a
-    ``KilledWorker`` failure after its configured retries.  Batch may also
-    kill a valid but oversized work unit at its time limit. Splitting either
+    Batch can kill the entire worker process, so the Python task may not
+    raise ``MemoryError`` itself. It may also kill an oversized work unit
+    at its time limit. Splitting either
     block is safe because it has no durable stage receipt yet; ordinary
     application errors remain resumable but are not silently subdivided.
     """
@@ -2241,9 +2050,9 @@ def _stage_failure_kind(error: object) -> str:
     text = f'{error_type}: {error}'.lower()
     if isinstance(error, TimeoutError) or 'attempt duration exceeded timeout' in text:
         return 'time_limit'
-    if isinstance(error, MemoryError) or 'memory' in text or 'nanny' in text:
+    if isinstance(error, MemoryError) or 'memory' in text or 'oom' in text:
         return 'memory_pressure'
-    if 'killedworker' in text or 'worker died' in text:
+    if 'worker died' in text or 'container exited' in text:
         return 'worker_lost_after_retries'
     return 'task_error'
 
@@ -2388,457 +2197,95 @@ def run_macro_staged_publish(
     storage: Storage,
     data: Data,
 ) -> int:
-    """Build one canonical array through durable stages and bounded writers.
+    """Run a small macro-v4 build through the same durable Batch work units.
 
-    Compute tasks can scale horizontally because they write immutable stages at
-    independent object-store prefixes.  The only operations against the shared
-    canonical TileDB array run through a small publisher pool.  The ledger is
-    the source of truth for resume; it is intentionally independent of Dask's
-    transient task graph and of TileDB's physical fragment inventory.
+    This local coordinator is deliberately serial. Production concurrency is
+    supplied by the external Batch dispatcher, never by an in-process fleet.
     """
-    driver_started = perf_counter()
-    macro_blocks, planner = plan_macro_blocks(
-        list(macros), config, storage, data
-    )
-    root_blocks = {_shard_name(block): block for block in macro_blocks}
-    if len(root_blocks) != len(macro_blocks):
-        raise RuntimeError('Macro-v4 planner produced non-unique block IDs.')
-    root_block_ids = sorted(root_blocks)
+    del macros, data
+    started = perf_counter()
+    plan = plan_macro_v4_staged_build(config)
     ledger = BuildLedger(config.build_ledger_uri, Storage.get_tdb_context(storage))
-    # Identity binds the immutable root plan.  Runtime resource failures may
-    # add ledger children below those roots without making a valid recovery
-    # look like a foreign build.
-    build_signature = _build_signature(config, storage, root_block_ids)
-    build_inputs = _build_inputs(config, storage, root_block_ids)
-    original_manifest = ledger.build_manifest()
-    resumed_build = ledger.assert_build_identity(
-        build_id=str(config.name),
-        canonical_uri=config.tdb_dir,
-        build_signature=build_signature,
-        build_inputs=build_inputs,
-    )
-    if not resumed_build:
-        ledger.append(
-            '__build__',
-            'build_started',
-            build_id=str(config.name),
-            canonical_uri=config.tdb_dir,
-            planned_block_count=len(root_block_ids),
-            schema_sha256=_block_schema_hash(storage),
-            build_signature=build_signature,
-            build_inputs=build_inputs,
-            time_slot=config.time_slot,
-        )
-    else:
-        original_time_slot = original_manifest.details.get('time_slot')
-        if original_time_slot is None:
-            raise ValueError(
-                'The existing build ledger predates time-slot recovery and '
-                'cannot safely resume this canonical-array build.'
-            )
-        config.time_slot = int(original_time_slot)
-    # Final canonical writes and consolidation share a conservative VFS
-    # budget. The independent stage writers use their own budget above.
-    storage.set_context_overrides(
-        **{'vfs.s3.max_parallel_ops': config.build_publish_vfs_parallel_ops}
-    )
-    # The original time slot is now bound (including on a resumed driver), so
-    # worker-stage metadata and canonical history describe one logical build.
-    storage.save_shatter_meta(config)
-
-    # Persist enough information to reconstruct every root on a later driver.
-    # New adaptive children carry equivalent descriptors in their own planned
-    # receipts and in the parent's immutable split receipt.
-    for block_id in root_block_ids:
-        if ledger.state(block_id) is None:
-            ledger.append(
-                block_id,
-                'planned',
-                **_ledger_block_details(
-                    root_blocks[block_id], parent_id=None, split_depth=0
-                ),
-            )
-
-    staged_results: list[MacroTaskResult] = []
-    published_results: list[MacroTaskResult] = []
-    stage_candidates: list[tuple[str, list[Extents], int]] = []
-    active_blocks = _active_ledger_blocks(root_blocks, ledger, storage)
-    for block_id, (block, split_depth) in sorted(active_blocks.items()):
+    pending = deque(plan.active_block_ids)
+    split_count = 0
+    stage_count = 0
+    adaptive_splits = []
+    failures = []
+    while pending:
+        block_id = pending.popleft()
         record = ledger.state(block_id)
         if record is not None and record.state == 'published':
-            published_results.append(_result_from_details(record.details))
-        elif record is not None and record.state == 'staged':
-            resumed = _result_from_details(
-                record.details, stage_uri=record.details.get('stage_uri')
-            )
-            resumed.block_id = block_id
-            staged_results.append(resumed)
-        else:
-            stage_candidates.append((block_id, block, split_depth))
-
-    failures = []
-    adaptive_split_count = 0
-    adaptive_splits = []
-    dc = get_client()
-
-    if dc is not None:
-        workers = dc.scheduler_info()['workers']
-        if not workers:
-            raise RuntimeError(
-                'macro-v4-staged-publish requires at least one Dask worker'
-            )
-        # Keep stages and canonical publishes on one event stream.  The
-        # previous executor synchronously waited on a publisher whenever its
-        # small pool was full.  A slow canonical write then blocked stage
-        # receipt handling and deferred split children until the entire stage
-        # generation had drained.
-        completion_stream = as_completed(
-            [], with_results=True, raise_errors=False
-        )
-        active_stages = {}
-        active_publishes = {}
-        pending_publishes = deque()
-        stage_candidates = deque(stage_candidates)
-        # A stage holds a full PDAL point view and a TileDB write buffer.  It
-        # is memory-bound, unlike the lightweight driver/publisher work, and
-        # must never share a Dask worker *process* with another stage.  The
-        # EC2 fleet gives every worker process one named resource token.  A
-        # generic user-supplied cluster may not expose it, so retain a
-        # conservative one-submission-per-worker fallback rather than using
-        # the sum of worker threads (which can oversubscribe memory 4x).
-        stage_resource_name = 'silvimetric_stage'
-        stage_resource_capacity = sum(
-            worker.get('resources', {}).get(stage_resource_name, 0)
-            for worker in workers.values()
-        )
-        stage_resources = (
-            {stage_resource_name: 1}
-            # Dedicated publisher processes intentionally do not advertise a
-            # stage token.  Testing this capacity against *all* workers would
-            # therefore disable the stage restriction in a split fleet and
-            # let memory-heavy PDAL work land on a publisher.  A positive
-            # named-resource capacity is the complete signal that the
-            # cluster supports isolated stage placement.
-            if stage_resource_capacity > 0
-            else None
-        )
-        stage_inflight_limit = max(
-            1,
-            int(stage_resource_capacity)
-            if stage_resources is not None
-            else len(workers),
-        )
-        # Canonical publication should be able to live on a small, durable
-        # worker pool after the PDAL-heavy stage fleet is retired.  A generic
-        # local Dask cluster has no such resource, so preserve the historical
-        # scheduling fallback for tests and user-managed clusters.
-        publisher_resource_name = 'silvimetric_publisher'
-        publisher_resource_capacity = sum(
-            worker.get('resources', {}).get(publisher_resource_name, 0)
-            for worker in workers.values()
-        )
-        if (
-            publisher_resource_capacity
-            and publisher_resource_capacity < config.build_publish_concurrency
-        ):
-            raise RuntimeError(
-                'macro-v4 dedicated publisher capacity is smaller than '
-                'build_publish_concurrency: '
-                f'{publisher_resource_capacity} < '
-                f'{config.build_publish_concurrency}'
-            )
-        publisher_resources = (
-            {publisher_resource_name: 1}
-            if publisher_resource_capacity >= config.build_publish_concurrency
-            else None
-        )
-        max_pending_publish_blocks = 0
-        stage_task_count = 0
-        resumed_staged_block_count = len(staged_results)
-        pending_publishes.extend(result.block_id for result in staged_results)
-        stage_tasks_complete_recorded = False
-
-        def record_stage_tasks_complete() -> None:
-            """Emit a durable handoff once no memory-heavy work remains.
-
-            The record is deliberately separate from ``build_published``:
-            independent publishers may still be reading durable stages and
-            writing the canonical array.  An external fleet controller can
-            safely retire workers that advertise only ``silvimetric_stage``
-            at this point without disturbing those publishers.
-            """
-            nonlocal stage_tasks_complete_recorded
-            if stage_tasks_complete_recorded:
-                return
-            if stage_candidates or active_stages:
-                return
-            ledger.append(
-                '__build__',
-                'build_stage_tasks_complete',
-                stage_task_count=stage_task_count,
-                staged_block_count=len(staged_results),
-                pending_publish_block_count=(
-                    len(pending_publishes) + len(active_publishes)
-                ),
-            )
-            stage_tasks_complete_recorded = True
-
-        def schedule_ready_work() -> None:
-            """Keep stage and canonical-publish work independently bounded."""
-            nonlocal stage_task_count, max_pending_publish_blocks
-            while (
-                stage_candidates
-                and len(active_stages) < stage_inflight_limit
-            ):
-                block_id, block, split_depth = stage_candidates.popleft()
-                future = dc.submit(
-                    stage_macro_block,
-                    macros=block,
-                    config=config,
-                    storage=storage,
-                    ledger_uri=config.build_ledger_uri,
-                    retries=config.build_stage_retries,
-                    resources=stage_resources,
-                )
-                active_stages[future] = (block_id, block, split_depth)
-                completion_stream.add(future)
-                stage_task_count += 1
-            while (
-                pending_publishes
-                and len(active_publishes) < config.build_publish_concurrency
-            ):
-                block_id = pending_publishes.popleft()
-                future = dc.submit(
-                    publish_staged_macro_block,
-                    block_id=block_id,
-                    config=config,
-                    ledger_uri=config.build_ledger_uri,
-                    retries=0,
-                    resources=publisher_resources,
-                )
-                active_publishes[future] = block_id
-                completion_stream.add(future)
-            max_pending_publish_blocks = max(
-                max_pending_publish_blocks, len(pending_publishes)
-            )
-
-        # A failed memory-bound stage yields children as soon as its future
-        # resolves.  They can be scheduled while unrelated roots continue,
-        # instead of waiting for every root in a breadth-first generation.
-        while (
-            stage_candidates
-            or active_stages
-            or pending_publishes
-            or active_publishes
-        ):
-            schedule_ready_work()
-            record_stage_tasks_complete()
-            future, result = next(completion_stream)
-            stage = active_stages.pop(future, None)
-            if stage is not None:
-                block_id, block, split_depth = stage
-                if future.status != 'finished':
-                    children = _split_failed_stage_block(
-                        block_id,
-                        block,
-                        split_depth,
-                        result,
-                        config,
-                        ledger,
-                    )
-                    if children:
-                        adaptive_split_count += 1
-                        split_receipt = ledger.state(block_id)
-                        adaptive_splits.append(
-                            {
-                                'parent_id': block_id,
-                                'failure_kind': split_receipt.details[
-                                    'failure_kind'
-                                ],
-                                'split_depth': split_depth,
-                                'child_ids': [
-                                    child_id for child_id, _, _ in children
-                                ],
-                            }
-                        )
-                        # A memory split is a corrective continuation of the
-                        # failed work unit, not another breadth-first root.
-                        # Put it ahead of untouched roots so recovery starts
-                        # at the next free stage slot.
-                        stage_candidates.extendleft(reversed(children))
-                    else:
-                        failures.append((future, result))
-                else:
-                    staged_results.append(result)
-                    pending_publishes.append(result.block_id)
-                continue
-
-            active_publishes.pop(future)
-            if future.status != 'finished':
-                failures.append((future, result))
-            else:
-                published_results.append(result)
-        record_stage_tasks_complete()
-        planner['distributed_executor'] = {
-            'mode': 'durable-stages-bounded-canonical-publishers',
-            'stage_task_count': stage_task_count,
-            'resume_staged_block_count': resumed_staged_block_count,
-            'publisher_concurrency': config.build_publish_concurrency,
-            'stage_inflight_limit': stage_inflight_limit,
-            'stage_resource': stage_resource_name if stage_resources else None,
-            'stage_resource_capacity': stage_resource_capacity,
-            'publisher_resource': (
-                publisher_resource_name if publisher_resources else None
-            ),
-            'publisher_resource_capacity': publisher_resource_capacity,
-            'max_pending_publish_blocks': max_pending_publish_blocks,
-            'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
-            'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,
-            'stage_retries': config.build_stage_retries,
-            'publish_retries': 0,
-            'adaptive_split_count': adaptive_split_count,
-            'adaptive_splits': adaptive_splits,
-        }
-    else:
-        stage_task_count = 0
-        resumed_staged_block_count = len(staged_results)
-        while stage_candidates:
-            pending_candidates = stage_candidates
-            stage_candidates = []
-            for block_id, block, split_depth in pending_candidates:
-                stage_task_count += 1
-                try:
-                    staged_results.append(
-                        stage_macro_block(
-                            block, config, storage, config.build_ledger_uri
-                        )
-                    )
-                except Exception as error:
-                    children = _split_failed_stage_block(
-                        block_id,
-                        block,
-                        split_depth,
-                        error,
-                        config,
-                        ledger,
-                    )
-                    if children:
-                        adaptive_split_count += 1
-                        split_receipt = ledger.state(block_id)
-                        adaptive_splits.append(
-                            {
-                                'parent_id': block_id,
-                                'failure_kind': split_receipt.details[
-                                    'failure_kind'
-                                ],
-                                'split_depth': split_depth,
-                                'child_ids': [
-                                    child_id for child_id, _, _ in children
-                                ],
-                            }
-                        )
-                        stage_candidates.extend(children)
-                    else:
-                        failures.append((None, error))
-        for result in staged_results:
+            continue
+        if record is None or record.state != 'staged':
             try:
-                published_results.append(
-                    publish_staged_macro_block(
-                        result.block_id, config, config.build_ledger_uri
-                    )
+                stage_count += 1
+                stage_macro_v4_batch_block(
+                    config.tdb_dir, config.build_ledger_uri, config.name, block_id
                 )
             except Exception as error:
-                failures.append((None, error))
-        planner['distributed_executor'] = {
-            'mode': 'local-durable-stages-bounded-canonical-publishers',
-            'stage_task_count': stage_task_count,
-            'resume_staged_block_count': resumed_staged_block_count,
-            'publisher_concurrency': 1,
-            'publisher_vfs_parallel_ops': config.build_publish_vfs_parallel_ops,
-            'stage_vfs_parallel_ops': config.build_stage_vfs_parallel_ops,
-            'stage_retries': 0,
-            'publish_retries': 0,
-            'adaptive_split_count': adaptive_split_count,
-            'adaptive_splits': adaptive_splits,
-        }
+                block, depth = _macro_v4_batch_block(block_id, ledger, storage)
+                children = _split_failed_stage_block(
+                    block_id, block, depth, error, config, ledger
+                )
+                if not children:
+                    failures.append(error)
+                    continue
+                split_count += 1
+                split_receipt = ledger.state(block_id)
+                adaptive_splits.append({
+                    'parent_id': block_id,
+                    'failure_kind': split_receipt.details['failure_kind'],
+                    'split_depth': depth,
+                    'child_ids': [child_id for child_id, _, _ in children],
+                })
+                pending.extendleft(
+                    child_id for child_id, _, _ in reversed(children)
+                )
+                continue
+        try:
+            publish_macro_v4_batch_block(
+                config.tdb_dir, config.build_ledger_uri, config.name, block_id
+            )
+        except Exception as error:
+            failures.append(error)
 
-    # Each block has at most one stable published receipt.  Compute the total
-    # from ledger state so a resumed driver cannot double-count prior work.
-    active_blocks = _active_ledger_blocks(root_blocks, ledger, storage)
-    active_block_ids = sorted(active_blocks)
-    summary = ledger.summary(active_block_ids)
-    published_records = [
-        record
-        for record in summary['records'].values()
-        if record is not None and record.state == 'published'
-    ]
-    config.point_count = sum(
-        int(record.details.get('point_count', 0))
-        for record in published_records
-    )
-    timing = summarize_macro_timing(
-        published_results,
-        perf_counter() - driver_started,
-        strategy='macro-v4-staged-publish',
-    )
-    timing['planner'] = planner
-    timing['build_ledger'] = {
-        'uri': config.build_ledger_uri,
-        'build_id': str(config.name),
-        'build_signature': build_signature,
-        'states': summary['states'],
-        'published_block_count': len(published_records),
-        'planned_block_count': len(active_block_ids),
-        'root_block_count': len(root_block_ids),
-        'adaptive_split_count': adaptive_split_count,
-        'partial': bool(failures)
-        or len(published_records) != len(active_block_ids),
-    }
-    config.execution_timing = timing
-
-    if failures or len(published_records) != len(active_block_ids):
-        ledger.append(
-            '__build__',
-            'build_partial',
-            build_id=str(config.name),
-            published_block_count=len(published_records),
-            planned_block_count=len(active_block_ids),
-            root_block_count=len(root_block_ids),
-            failed_task_count=len(failures),
-        )
-        if failures:
-            _raise_task_failures(failures)
+    if failures:
         raise RuntimeError(
-            'Macro-v4 staged build is incomplete; resume with the same '
-            'build name and ledger URI.'
-        )
+            f'{len(failures)} local Batch work unit(s) failed: '
+            f'{failures[0]}'
+        ) from failures[0]
 
-    # This is the durable handoff between the horizontally scalable build
-    # phase and array maintenance. It is recorded only after every active leaf
-    # has a published receipt, so a scheduler-only finalizer never has to
-    # rediscover or execute point-cloud work.
-    published_build = {
-        'build_id': str(config.name),
-        'planned_block_count': len(active_block_ids),
-        'root_block_count': len(root_block_ids),
-        'published_block_count': len(published_records),
-        'point_count': config.point_count,
+    completed = complete_macro_v4_batch_build(
+        config.tdb_dir, config.build_ledger_uri, config.name
+    )
+    config.point_count = completed['point_count']
+    config.execution_timing = {
+        'strategy': 'macro-v4-staged-publish',
+        'local_batch_driver_seconds': round(perf_counter() - started, 6),
+        'planner': {
+            **plan.planner,
+            'local_batch_driver': {'stage_task_count': stage_count},
+        },
+        'build_ledger': {
+            'uri': config.build_ledger_uri,
+            'build_id': str(config.name),
+            'states': completed['states'],
+            'planned_block_count': completed['planned_block_count'],
+            'published_block_count': completed['published_block_count'],
+            'root_block_count': completed['root_block_count'],
+            'adaptive_split_count': split_count,
+            'adaptive_splits': adaptive_splits,
+            'partial': False,
+        },
     }
-    prior_build_state = ledger.state('__build__')
-    if prior_build_state is None or prior_build_state.state != 'build_sealed':
-        ledger.append('__build__', 'build_published', **published_build)
-
     if config.defer_build_finalization:
-        timing['array'] = {
+        config.execution_timing['array'] = {
             'fragment_target_mb': config.stage_fragment_size_mb,
             'finalization_deferred': True,
         }
-        config.execution_timing = timing
-        return config.point_count
-
-    config.execution_timing = timing
-    return _seal_macro_v4_staged_build(config, storage, ledger)
-
+    else:
+        _seal_macro_v4_staged_build(config, storage, ledger)
+    return config.point_count
 
 def _latest_build_receipt(ledger: BuildLedger, state: str):
     """Return the newest receipt for one build-level transition."""
@@ -2856,7 +2303,7 @@ def _seal_macro_v4_staged_build(
 ) -> int:
     """Seal a fully published build, optionally deferring global maintenance.
 
-    This function deliberately has no ``Data`` or Dask dependency. It is safe
+    This function deliberately has no ``Data`` dependency. It is safe
     to run after the point-processing workers have gone away, and an
     interrupted maintenance attempt re-enters from the immutable published
     receipt rather than physical fragment names.
@@ -3005,7 +2452,7 @@ def finalize_macro_v4_staged_build(
     tdb_dir: str, build_ledger_uri: str, build_id: str | uuid.UUID,
     *, consolidate: bool = True,
 ) -> ShatterConfig:
-    """Seal a published macro-v4 build without a Dask or PDAL worker fleet.
+    """Seal a published macro-v4 build without a PDAL worker fleet.
 
     Storage history and the immutable ledger manifest bind this operation to
     the original shatter configuration. The finalizer therefore does not

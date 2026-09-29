@@ -420,7 +420,7 @@ class Data:
         """Densify and transform a rectangular extent between CRS spaces.
 
         ``pyproj`` is normally the fastest and most direct route.  In the
-        Linux/aarch64 Dask-worker environment, however, PROJ can occasionally
+        Linux/aarch64 worker environment, however, PROJ can occasionally
         be initialized in an unusable state and return four infinities rather
         than raising.  Do not hand that malformed extent to PDAL: use GDAL's
         independently initialized OSR transform as a bounded fallback.

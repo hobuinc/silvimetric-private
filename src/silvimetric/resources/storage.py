@@ -71,9 +71,8 @@ class Storage:
 
         self.config: StorageConfig = config
         self._reader: tiledb.DenseArray = None
-        # TileDB contexts are process-local. Keep only serializable overrides
-        # so a bounded publisher can lower its S3 concurrency after Dask sends
-        # this Storage instance to a worker.
+        # TileDB contexts are process-local. Keep serializable overrides so
+        # each publisher can lower its own S3 concurrency.
         self._context_overrides: dict[str, str] = {}
 
     def __enter__(self):
@@ -86,7 +85,7 @@ class Storage:
         return
 
     def __getstate__(self):
-        """Exclude the process-local TileDB reader from Dask serialization."""
+        """Exclude the process-local TileDB reader from serialization."""
         state = self.__dict__.copy()
         state['_reader'] = None
         return state
@@ -627,8 +626,7 @@ class Storage:
         :yield: TileDB array context manager.
         """
 
-        # tiledb and dask have bad interaction with opening an array if
-        # other threads present
+        # TileDB array opening can interact badly with other active threads.
         ctx = Storage.get_tdb_context(self)
 
         # non-timestamped reader and writer are stored as member variables to

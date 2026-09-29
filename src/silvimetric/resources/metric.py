@@ -18,7 +18,6 @@ import numpy as np
 import dill
 import pandas as pd
 
-from distributed import Future
 from .attribute import Attribute
 
 MetricFn = Callable[[pd.DataFrame, Any], pd.DataFrame]
@@ -242,9 +241,6 @@ class Metric:
         # the index columns are determined by where this data is coming from
         # if it has xi and yi, then it's coming from shatter
         # if it has X and Y, then it's coming from extract as a rerun of a cell
-        if isinstance(data, Future):
-            data = data.result()
-
         idx = ['yi', 'xi']
         if any([i not in data.columns for i in idx]):
             idx = ['Y', 'X']

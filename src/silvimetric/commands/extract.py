@@ -1,12 +1,11 @@
 from pathlib import Path
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor
 
 from osgeo import gdal, osr
-import dask
 import numpy as np
 import pandas as pd
 import tiledb
-from distributed.client import _get_global_client as get_client
 
 from .. import Storage, Extents, ExtractConfig, Bounds
 
@@ -166,8 +165,6 @@ def extract(config: ExtractConfig) -> None:
     :param config: ExtractConfig.
     """
 
-    dask.config.set({'dataframe.convert-string': False})
-
     if tiledb.object_type(
         config.tdb_dir, ctx=Storage.get_tdb_context()
     ) == 'group':
@@ -192,23 +189,23 @@ def extract(config: ExtractConfig) -> None:
             if a in m.attributes:
                 cell_size = cell_size + np.dtype(m.dtype).itemsize
 
-    client = get_client()
-    if client is None or len(storages) == 1:
+    if len(storages) == 1:
         frames = [get_data(config, member, e) for member in storages]
     else:
-        # Shards are independent immutable arrays.  Read them on the Dask
-        # workers while the shatter fleet is still available, then preserve
-        # the group order when gathering for the existing dedup semantics.
-        futures = [
-            client.submit(get_shard_data, config, member.config.tdb_dir, e)
-            for member in storages
-        ]
-        frames = client.gather(futures)
+        # Shards are independent immutable arrays. Preserve their order for
+        # the existing dedup semantics while bounding local read parallelism.
+        with ThreadPoolExecutor(max_workers=min(8, len(storages))) as executor:
+            frames = list(executor.map(
+                lambda member: get_shard_data(
+                    config, member.config.tdb_dir, e
+                ),
+                storages,
+            ))
     final = pd.concat(frames)
     # Spatial shards are expected to be disjoint.  Keep the newest value if a
     # future overlapping shard is present, matching existing TileDB semantics.
     final = final[~final.index.duplicated(keep='last')]
-    futures = []
+    rasters = []
     for ma in ma_list:
         dtype = schema.attr(ma).dtype
         nan_val = -9999 if dtype.kind in ['i', 'f'] else 0
@@ -222,17 +219,8 @@ def extract(config: ExtractConfig) -> None:
         unstacked = unstacked.fillna(nan_val)
         m_data = unstacked.to_numpy()
 
-        futures.append(
-            dask.delayed(write_tif)(
-                e.bounds, m_data, nan_val, ma, dtype, config
-            )
-        )
+        rasters.append((e.bounds, m_data, nan_val, ma, dtype, config))
 
-    # Shard reads above can use an active distributed client.  Raster writes
-    # deliberately stay on the process that owns ``config.out_dir``: worker
-    # hosts do not share that filesystem, and their output would not be part
-    # of the caller's extract result.
-    if client is None:
-        dask.compute(*futures)
-    else:
-        dask.compute(*futures, scheduler="threads")
+    # Raster writes stay on the process that owns ``config.out_dir``.
+    with ThreadPoolExecutor(max_workers=min(8, len(rasters) or 1)) as executor:
+        list(executor.map(lambda args: write_tif(*args), rasters))
