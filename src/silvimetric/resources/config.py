@@ -235,19 +235,6 @@ class ApplicationConfig(Config):
     debug: bool = field(default=False)
     """Debug mode, defaults to False"""
 
-    # Dask configuration
-    dasktype: str = field(default='processes')
-    """Dask parallelization type. For information see
-    https://docs.dask.org/en/stable/scheduling.html#local-threads """
-    scheduler: str = field(default='distributed')
-    """Dask scheduler, defaults to 'distributed'"""
-    workers: int = field(default=12)
-    """Number of dask workers"""
-    threads: int = field(default=4)
-    """Number of threads per dask worker"""
-    watch: bool = field(default=False)
-    """Open dask diagnostic page in default web browser"""
-
     def to_json(self):
         d = super().to_json()
         return d
@@ -258,11 +245,6 @@ class ApplicationConfig(Config):
         n = cls(
             tdb_dir=x['tdb_dir'],
             debug=x['debug'],
-            dasktype=x['dasktype'],
-            scheduler=x['scheduler'],
-            workers=x['workers'],
-            threads=x['threads'],
-            watch=x['watch'],
         )
         return n
 
@@ -343,8 +325,6 @@ class ShatterConfig(Config):
     """
     stage_planner_density_safety_factor: float = field(default=1.25)
     """Inflation applied to measured source density before shard splitting."""
-    stage_worker_address: Union[str, None] = field(default=None)
-    """Optional Dask worker address on which to place the stage writer actor."""
     build_stage_uri: Union[str, None] = field(default=None)
     """Durable URI for immutable macro-v4 staged arrays."""
     build_ledger_uri: Union[str, None] = field(default=None)
@@ -352,12 +332,7 @@ class ShatterConfig(Config):
     build_publish_concurrency: int = field(default=4)
     """Maximum concurrent writers allowed to commit the canonical array."""
     build_stage_retries: int = field(default=0)
-    """Dask retries for one immutable macro-v4 stage task.
-
-    Memory-limited tasks must be split after their first failed execution;
-    retries are appropriate only when a caller has evidence of transient
-    infrastructure loss.
-    """
+    """Deprecated local retry setting; Batch controls job attempts externally."""
     build_max_split_depth: int = field(default=8)
     """Maximum adaptive spatial subdivisions for one failed macro-v4 block."""
     build_min_cells_per_side: Union[int, None] = field(default=None)
@@ -624,7 +599,6 @@ class ShatterConfig(Config):
             stage_planner_density_safety_factor=(
                 self.stage_planner_density_safety_factor
             ),
-            stage_worker_address=self.stage_worker_address,
             build_stage_uri=self.build_stage_uri,
             build_ledger_uri=self.build_ledger_uri,
             build_publish_concurrency=self.build_publish_concurrency,
@@ -712,7 +686,6 @@ class ShatterConfig(Config):
             stage_planner_density_safety_factor=x.get(
                 'stage_planner_density_safety_factor', 1.25
             ),
-            stage_worker_address=x.get('stage_worker_address'),
             build_stage_uri=x.get('build_stage_uri'),
             build_ledger_uri=x.get('build_ledger_uri'),
             build_publish_concurrency=x.get('build_publish_concurrency', 4),

@@ -1,11 +1,6 @@
 import click
 import pyproj
-import webbrowser
-
-import dask
 import numpy as np
-from dask.diagnostics import ProgressBar
-from dask.distributed import Client, LocalCluster
 
 from ..resources.metrics import (
     l_moments,
@@ -190,57 +185,3 @@ class MetricParamType(click.ParamType):
                         ctx,
                     )
         return list(metrics)
-
-
-def dask_handle(
-    dasktype: str,
-    scheduler: str,
-    workers: int,
-    threads: int,
-    watch: bool,
-) -> None:
-    dask_config = {}
-
-    if dasktype == 'threads':
-        dask_config['n_workers'] = threads
-        dask_config['threads_per_worker'] = 1
-    if dasktype == 'processes':
-        dask_config['n_workers'] = workers
-        dask_config['threads_per_worker'] = threads
-
-    if scheduler == 'local':
-        # fall back to dask type to determine the scheduler type
-        dask_config['scheduler'] = dasktype
-        if watch:
-            p = ProgressBar()
-            p.register()
-
-    elif scheduler == 'distributed':
-        dask_config['scheduler'] = scheduler
-        if dasktype == 'processes':
-            cluster = LocalCluster(
-                processes=True, n_workers=workers, threads_per_worker=threads
-            )
-        elif dasktype == 'threads':
-            cluster = LocalCluster(
-                processes=False, n_workers=workers, threads_per_worker=threads
-            )
-        else:
-            raise ValueError(f"Invalid value for 'dasktype', {dasktype}")
-
-        client = Client(cluster)
-        client.get_versions(check=True)
-        dask_config['distributed.client'] = client
-        if watch:
-            webbrowser.open(client.cluster.dashboard_link)
-
-    elif scheduler == 'single-threaded':
-        dask_config['scheduler'] = scheduler
-
-    dask.config.set(dask_config)
-
-
-def close_dask() -> None:
-    client = dask.config.get('distributed.client')
-    if isinstance(client, Client):
-        client.close()

@@ -1,5 +1,4 @@
 import click
-from dask.distributed import performance_report
 import pyproj
 import logging
 
@@ -14,7 +13,6 @@ from .common import (
     AttrParamType,
     MetricParamType,
 )
-from .common import dask_handle, close_dask
 
 
 @click.group()
@@ -30,32 +28,6 @@ from .common import dask_handle, close_dask
 @click.option(
     '--log-dir', default=None, help='Directory for log output', type=str
 )
-@click.option('--workers', type=int, help='Number of workers for Dask')
-@click.option(
-    '--threads', type=int, help='Number of threads per worker for Dask'
-)
-@click.option(
-    '--watch',
-    is_flag=True,
-    default=False,
-    type=bool,
-    help='Open dask diagnostic page in default web browser.',
-)
-@click.option(
-    '--dasktype',
-    default='processes',
-    type=click.Choice(['threads', 'processes']),
-    help='What Dask uses for parallelization. For more information see here'
-    ' https://docs.dask.org/en/stable/scheduling.html#local-threads',
-)
-@click.option(
-    '--scheduler',
-    default='local',
-    type=click.Choice(['distributed', 'local', 'single-threaded']),
-    help='Type of dask scheduler. Both are '
-    'local, but are run with different dask libraries. See more here '
-    'https://docs.dask.org/en/stable/scheduling.html.',
-)
 @click.version_option(__version__)
 @click.pass_context
 def cli(
@@ -63,11 +35,6 @@ def cli(
     database,
     debug,
     log_dir,
-    dasktype,
-    scheduler,
-    workers,
-    threads,
-    watch,
 ):
     # Set up logging
     if debug:
@@ -84,14 +51,8 @@ def cli(
         tdb_dir=database,
         log=log,
         debug=debug,
-        scheduler=scheduler,
-        dasktype=dasktype,
-        workers=workers,
-        threads=threads,
-        watch=watch,
     )
     ctx.obj = app
-    ctx.call_on_close(close_dask)
 
 
 @cli.command('info')
@@ -209,13 +170,6 @@ def scan_cmd(
 ):
     """Scan point cloud, output information on it, and determine the optimal
     tile size."""
-    dask_handle(
-        app.dasktype,
-        app.scheduler,
-        app.workers,
-        app.threads,
-        app.watch,
-    )
     return scan.scan(
         app.tdb_dir,
         pointcloud,
@@ -408,12 +362,6 @@ def initialize_cmd(
     ),
 )
 @click.option(
-    '--stage-worker-address',
-    type=str,
-    default=None,
-    help='Optional Dask worker address for the macro-v3 stage writer actor.',
-)
-@click.option(
     '--stage-planner-calibration-sample-count',
     type=click.IntRange(min=1),
     default=4,
@@ -471,10 +419,7 @@ def initialize_cmd(
     type=click.IntRange(min=0),
     default=0,
     show_default=True,
-    help=(
-        'Dask retries for one immutable macro-v4 stage task. Keep zero for '
-        'memory-bound work so the failed block splits immediately.'
-    ),
+    help='Deprecated stage retry setting retained for build compatibility.',
 )
 @click.option(
     '--build-max-split-depth',
@@ -513,13 +458,6 @@ def initialize_cmd(
     ),
 )
 @click.option(
-    '--report',
-    is_flag=True,
-    default=False,
-    type=bool,
-    help='Whether or not to write a report of the process for debugging',
-)
-@click.option(
     '--date',
     type=click.DateTime(['%Y-%m-%d', '%Y-%m-%dT%H:%M:%SZ']),
     help='Date the data was produced.',
@@ -542,7 +480,6 @@ def shatter_cmd(
     bounds,
     usgs_albers,
     water_mask_uri,
-    report,
     tilesize,
     processing_strategy,
     read_group_size,
@@ -550,7 +487,6 @@ def shatter_cmd(
     stage_tiledb_dir,
     stage_publish_uri,
     stage_fragment_size_mb,
-    stage_worker_address,
     stage_planner_calibration_sample_count,
     stage_planner_calibration_window_m,
     stage_planner_local_calibration_sample_count,
@@ -568,14 +504,6 @@ def shatter_cmd(
     dates,
 ):
     """Insert data provided by POINTCLOUD into the silvimetric DATABASE"""
-
-    dask_handle(
-        app.dasktype,
-        app.scheduler,
-        app.workers,
-        app.threads,
-        app.watch,
-    )
 
     if date is not None and dates is not None:
         app.log.warning(
@@ -606,7 +534,6 @@ def shatter_cmd(
         stage_tdb_dir=stage_tiledb_dir,
         stage_publish_uri=stage_publish_uri,
         stage_fragment_size_mb=stage_fragment_size_mb,
-        stage_worker_address=stage_worker_address,
         stage_planner_calibration_sample_count=(
             stage_planner_calibration_sample_count
         ),
@@ -630,20 +557,7 @@ def shatter_cmd(
         defer_build_finalization=defer_build_finalization,
     )
 
-    if report:
-        if app.scheduler != 'distributed':
-            app.log.warning(
-                'Report option is incompatible with scheduler'
-                '{scheduler}, skipping.'
-            )
-            shatter.shatter(config)
-        else:
-            report_path = f'reports/{config.name}.html'
-            with performance_report(report_path):
-                shatter.shatter(config)
-            app.log.debug(f'Writing report to {report_path}.')
-    else:
-        shatter.shatter(config)
+    shatter.shatter(config)
 
 
 @cli.command('extract')
@@ -677,14 +591,6 @@ def shatter_cmd(
 @click.pass_obj
 def extract_cmd(app, attributes, metrics, outdir, bounds):
     """Extract silvimetric metrics from DATABASE"""
-
-    dask_handle(
-        app.dasktype,
-        app.scheduler,
-        app.workers,
-        app.threads,
-        app.watch,
-    )
 
     config = ExtractConfig(
         tdb_dir=app.tdb_dir,

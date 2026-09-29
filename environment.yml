@@ -10,7 +10,6 @@ dependencies:
   - libpdal-core>=2.9.2
   - python-pdal
   - numpy
-  - dask>=2024.11.2
   - pyproj
   - gdal
   - scipy
