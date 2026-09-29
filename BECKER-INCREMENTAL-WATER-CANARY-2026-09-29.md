@@ -80,6 +80,12 @@ with $12.52 of its $30 cap unreserved. Reconcile actual tagged EC2, EBS,
 S3, and network charges when billing posts before using this canary as a
 per-point price estimate.
 
+After validation, the temporary Phase 2 CloudFormation stack was deleted and
+its collection lease released. The account had no pending, running, or
+stopping EC2 instances at the final check. Its ECR image, DynamoDB control
+table, and CloudWatch logs were explicitly retained for provenance; the
+private S3 canonical array, snapshot, stages, and ledgers were not deleted.
+
 The next build can treat the first 20B as the canonical base, retain an
 immutable copy for the isolated consolidation benchmark, then append another
 disjoint phase. Keep the pinned mask, source recipe, resume receipts,
