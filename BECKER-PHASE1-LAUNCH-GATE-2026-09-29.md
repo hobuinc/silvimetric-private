@@ -51,6 +51,8 @@ and NoData in all 189 zero-count cells. Its geotransform was
 The $175 is an admission limit and tagged budget threshold, **not a posted
 bill or an absolute AWS account spending limit**. As of the preflight, the
 September account budget showed $490.845 calculated spend against $1,250.
+The control table shows 17,482 of 17,500 reservation units remaining after
+the stage and publisher, or $0.18 reserved; that figure is not their bill.
 Wait for tagged compute, EBS, S3, and network usage before claiming actual
 per-point cost. The first block is small and partly water-masked, so its
 throughput should not be extrapolated alone to all 256 blocks.
