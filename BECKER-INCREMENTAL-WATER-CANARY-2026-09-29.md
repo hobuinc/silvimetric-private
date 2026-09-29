@@ -62,8 +62,8 @@ equivalence with that older build.
 The Phase 2 quality gate passed for all 28 immutable stages: stage counts and
 five sampled metrics matched the canonical array, sampled GDAL TileDB reads
 matched, `extract` matched, and a 75,720-point cell's raw Z values reproduced
-its stored mean and L-moments. Its local report is
-`/private/tmp/becker-incremental-canary-phase2-quality.json`.
+its stored mean and L-moments. Both read-only quality-gate reports are retained
+as `builds/<RunId>/validation/quality-gate.json` in the private Becker bucket.
 
 Collection-level consolidation verified the two sealed, non-overlapping
 phase footprints and their point counts, then reduced the canonical array
