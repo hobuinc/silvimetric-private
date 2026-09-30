@@ -17,5 +17,6 @@ dependencies:
   - python-json-logger
   - dill
   - pandas<3.0.0
+  - pyarrow
   - typing_extensions
   - fast-histogram
